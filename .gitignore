@@ -1,0 +1,34 @@
+# All Data Folders
+data/
+data_full/
+road_data/
+datasets/
+
+# All Large Data Files & Archives
+*.zip
+*.tar.gz
+*.csv
+*.parquet
+*.pcap
+*.log
+*.txt
+
+# Models, Weights & Checkpoints
+*.pth
+*.pt
+*.pkl
+*.joblib
+*.onnx
+models/
+checkpoints/
+
+# Outputs & Environments
+logs/
+results/
+outputs/
+venv/
+.venv/
+__pycache__/
+.vscode/
+.idea/
+.DS_Store
