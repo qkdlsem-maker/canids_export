@@ -72,3 +72,27 @@ with open(out_path, "w", encoding="utf-8") as f:
     f.write(f"\n정상 구간 오탐율(FPR): {fpr:.3%}\n")
 
 print(f"\n[완료] {out_path} 저장됨")
+
+# ---------- 반복 실행 비교용 로그에 누적 저장 ----------
+import csv as _csv
+log_path = os.path.join(HERE, "..", "results", "f1_runs_log.csv")
+overall_any_alert = np.mean([np.mean([v[1] for v in vals]) for vals in recalls.values()]) if recalls else float("nan")
+overall_latency = np.mean([np.mean(latencies.get(label, [np.nan])) for label in recalls]) * 1000 if recalls else float("nan")
+
+# 리소스 사용량 로그가 있으면 같이 읽기
+peak_rss, avg_cpu, max_cpu = "", "", ""
+res_path = os.path.join(HERE, "..", "results", "realtime_resource_usage.txt")
+if os.path.exists(res_path):
+    with open(res_path) as rf:
+        for line in rf:
+            if line.startswith("peak_rss_mb="): peak_rss = line.split("=")[1].strip()
+            if line.startswith("avg_cpu_percent="): avg_cpu = line.split("=")[1].strip()
+            if line.startswith("max_cpu_percent="): max_cpu = line.split("=")[1].strip()
+
+write_header = not os.path.exists(log_path)
+with open(log_path, "a", newline="", encoding="utf-8") as lf:
+    w = _csv.writer(lf)
+    if write_header:
+        w.writerow(["timestamp", "fpr", "overall_any_alert", "overall_latency_ms", "peak_rss_mb", "avg_cpu_pct", "max_cpu_pct", "n_bursts", "n_messages"])
+    w.writerow([pd.Timestamp.now(), f"{fpr:.5f}", f"{overall_any_alert:.4f}", f"{overall_latency:.3f}", peak_rss, avg_cpu, max_cpu, len(gt), len(pred)])
+print(f"[누적 로그] {log_path}에 이번 실행 결과 추가됨")

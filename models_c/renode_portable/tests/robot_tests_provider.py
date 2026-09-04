@@ -1,0 +1,1411 @@
+# pylint: disable=C0301,C0103,C0111
+from __future__ import print_function
+from sys import platform
+import os
+import threading
+import sys
+import socket
+import fnmatch
+import subprocess
+import psutil
+import shutil
+import tempfile
+import uuid
+import re
+import signal
+from collections import OrderedDict, defaultdict
+from time import monotonic, sleep
+from typing import List, Dict, Tuple, Set, Optional, Union
+from argparse import Namespace
+from dataclasses import dataclass
+
+import robot, robot.result, robot.running, robot.api, robot.errors
+from robot.libraries.BuiltIn import BuiltIn
+from robot.libraries.DateTime import Time
+
+import xml.etree.ElementTree as ET
+import urllib.parse
+
+from tests_engine import TestResult, TestTag, CRITICAL_TEST
+from unstable_tests import KnownUnstableSuite, filter_unstable
+
+this_path = os.path.abspath(os.path.dirname(__file__))
+
+keywords_path = os.path.abspath(os.path.join(this_path, "renode-keywords.robot"))
+keywords_path = keywords_path.replace(os.path.sep, "/")  # Robot wants forward slashes even on Windows
+
+DEFAULT_RENODE_BINARY_NAME = 'Renode.dll'
+
+if platform == "win32":
+    CREATE_NEW_PROCESS_GROUP = 0x00000200  # subprocess.CREATE_NEW_PROCESS_GROUP
+else:
+    CREATE_NEW_PROCESS_GROUP = 0
+
+@dataclass(frozen=True)
+class CpuTime:
+    user_time: float
+    system_time: float
+
+    def to_metadata(self) -> dict[str, float]:
+        return {
+            "cpu_time_user": self.user_time,
+            "cpu_time_system": self.system_time
+        }
+
+
+@dataclass(frozen=True)
+class ThreadTime(CpuTime):
+    id: int
+
+    def to_metadata(self) -> dict[str, float]:
+        return {
+            f"thread_{self.id}_user_time": self.user_time,
+            f"thread_{self.id}_system_time": self.system_time,
+        }
+
+
+@dataclass(frozen=True)
+class ProcessStatistics:
+    cpu_time: CpuTime
+    threads: list[ThreadTime]
+
+    def to_metadata(self) -> dict[str, Union[int, float]]:
+        threads_metadata = {}
+        for thread in self.threads:
+            if thread.user_time > 0 or thread.system_time > 0:
+                threads_metadata.update(thread.to_metadata())
+
+        return self.cpu_time.to_metadata() | threads_metadata
+
+
+class ProcessMemoryMonitor(threading.Thread):
+    def __init__(self, pid: int, initial_sample_delay_seconds: float, interval_seconds: float) -> None:
+        super().__init__(daemon=True, name=f"MemoryMonitor-{pid}")
+        self.pid: int = pid
+        self.initial_sample_delay: float = initial_sample_delay_seconds
+        self.interval_seconds: float = interval_seconds
+        self.stop_event: threading.Event = threading.Event()
+        self.peak_unique_set_size: int = 0
+        self.lock: threading.Lock = threading.Lock()
+
+        try:
+            self.process: Optional[psutil.Process] = psutil.Process(self.pid)
+        except psutil.NoSuchProcess:
+            self.process = None
+
+    def sample_memory_usage(self) -> bool:
+        if not self.process:
+            print(f"cannot monitor memory usage of pid {self.pid}: no such process", flush=True)
+            return False
+
+        try:
+            current_unique_set_size: int = self.process.memory_full_info().uss
+            # Lock ensures we don't reset while comparing
+            with self.lock:
+                if current_unique_set_size > self.peak_unique_set_size:
+                    self.peak_unique_set_size = current_unique_set_size
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            return False
+
+        return True 
+
+    def run(self) -> None:
+        print(f"Starting memory monitor for pid {self.pid}...", flush=True)
+
+        # Take one initial sample
+        if self.stop_event.wait(self.initial_sample_delay):
+            return
+        self.sample_memory_usage()
+
+        while not self.stop_event.is_set():
+            # Wait for interval, but wake up immediately if stop_event is set.
+            if self.stop_event.wait(self.interval_seconds):
+                break
+
+            # Try to collect memory usage.
+            if not self.sample_memory_usage():
+                break 
+
+    def get_peak_and_reset(self) -> int:
+        # Sample one last time before resetting, in case we don't have any samples yet.
+        self.sample_memory_usage()
+
+        with self.lock:
+            current_peak = self.peak_unique_set_size
+            self.peak_unique_set_size = 0
+            return current_peak
+
+    def stop(self) -> None:
+        print(f"Stopping memory monitor for process {self.pid}...", flush=True)
+        self.stop_event.set()
+        if self.is_alive():
+            self.join()
+
+
+def collect_process_stats(process: psutil.Process) -> Optional[ProcessStatistics]:
+    try:
+        with process.oneshot():
+            cpu_times = process.cpu_times()
+            threads = process.threads()
+            process_stats = ProcessStatistics(
+                cpu_time=CpuTime(user_time=cpu_times.user, system_time=cpu_times.system), 
+                threads=[
+                    ThreadTime(id=thread.id, user_time=thread.user_time, system_time=thread.system_time) 
+                    for thread in threads
+                ], 
+            )
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        print(f"Failed to collect process stats for {process.pid}")
+        return None
+
+    print(f"Collected process statistics for pid {process.pid}")
+    return process_stats
+
+
+class Timeout:
+    def __init__(self, value: str):
+        self.seconds = Time(value).seconds
+        self.value = value
+
+    def __repr__(self):
+        return f"{self.value} ({self.seconds}s)"
+
+
+def install_cli_arguments(parser):
+    group = parser.add_mutually_exclusive_group()
+
+    group.add_argument("--robot-framework-remote-server-full-directory",
+                       dest="remote_server_full_directory",
+                       action="store",
+                       help="Full location of robot framework remote server binary.")
+
+    group.add_argument("--robot-framework-remote-server-directory-prefix",
+                       dest="remote_server_directory_prefix",
+                       action="store",
+                       default=os.path.join(this_path, '../output/bin'),
+                       help="Directory of robot framework remote server binary. This is concatenated with current configuration to create full path.")
+
+    parser.add_argument("--robot-framework-remote-server-name",
+                        dest="remote_server_name",
+                        action="store",
+                        default=DEFAULT_RENODE_BINARY_NAME,
+                        help="Name of robot framework remote server binary.")
+
+    parser.add_argument("--robot-framework-remote-server-port", "-P",
+                        dest="remote_server_port",
+                        action="store",
+                        default=0,
+                        type=int,
+                        help="Port of robot framework remote server binary. Use '0' to automatically select any unused private port.")
+
+    parser.add_argument("--enable-xwt",
+                        dest="enable_xwt",
+                        action="store_true",
+                        default=False,
+                        help="Enables support for XWT.")
+
+    parser.add_argument("--show-log",
+                        dest="show_log",
+                        action="store_true",
+                        default=False,
+                        help="Display log messages in console (might corrupt robot summary output).")
+
+    parser.add_argument("--keep-renode-output",
+                        dest="keep_renode_output",
+                        action="store_true",
+                        default=False,
+                        help=" ".join([
+                            "Redirect Renode stdout and stderr to log files.",
+                            "Only non-empty log files are kept (i.e. up to 2 per suite).",
+                            "This is separate from the usual logs generated by RobotFramework.",
+                            "Implies --show-log (output is redirected and does not appear in console).",
+                        ]))
+
+    parser.add_argument("--verbose",
+                        dest="verbose",
+                        action="store_true",
+                        default=False,
+                        help="Print verbose info from Robot Framework.")
+
+    parser.add_argument("--hot-spot",
+                        dest="hotspot",
+                        action="store",
+                        default=None,
+                        help="Test given hot spot action.")
+
+    parser.add_argument("--variable",
+                        dest="variables",
+                        action="append",
+                        default=None,
+                        help="Variable to pass to Robot.")
+
+    parser.add_argument("--css-file",
+                        dest="css_file",
+                        action="store",
+                        default=os.path.join(this_path, '../lib/resources/styles/robot.css'),
+                        help="Custom CSS style for the result files.")
+
+    parser.add_argument("--debug-on-error",
+                        dest="debug_on_error",
+                        action="store_true",
+                        default=False,
+                        help="Enables the Renode User Interface when test fails.")
+
+    parser.add_argument("--cleanup-timeout",
+                        dest="cleanup_timeout",
+                        action="store",
+                        default=3,
+                        type=int,
+                        help="Robot frontend process cleanup timeout in seconds.")
+
+    parser.add_argument("--kill-timeout",
+                        dest="kill_timeout",
+                        action="store",
+                        default=15,
+                        type=int,
+                        help="Robot frontend process kill timeout in seconds if cleanup attempt fails.")
+
+    parser.add_argument("--listener",
+                        action="append",
+                        help="Path to additional progress listener (can be provided many times).")
+
+    parser.add_argument("--renode-config",
+                        dest="renode_config",
+                        action="store",
+                        default=None,
+                        help="Path to the Renode config file.")
+
+    parser.add_argument("--kill-stale-renode-instances",
+                        dest="autokill_renode",
+                        action="store_true",
+                        default=False,
+                        help="Automatically kill stale Renode instances without asking.")
+
+    parser.add_argument("--gather-execution-metrics",
+                        dest="execution_metrics",
+                        action="store_true",
+                        default=False,
+                        help="Gather execution metrics for each suite.")
+
+    parser.add_argument("--test-timeout",
+                        dest="timeout",
+                        action="store",
+                        default=None,
+                        type=Timeout,
+                        help=" ".join([
+                            "Default test case timeout after which Renode keywords will be interrupted.",
+                            "It's parsed by Robot Framework's DateTime library so all its time formats are supported.",
+                        ]))
+
+    parser.add_argument("--with-resource-monitoring",
+                        dest="enable_resource_monitoring",
+                        action="store_true",
+                        default=False,
+                        help="Enables monitoring of system resource usage (RAM, CPU time).")
+
+    parser.add_argument("--memory-monitor-initial-delay",
+                        dest="memory_monitor_initial_delay_seconds",
+                        action="store",
+                        default=2,
+                        type=int,
+                        help="How many seconds to wait before the initial memory usage sample is collected.")
+
+    parser.add_argument("--memory-monitor-sample-interval",
+                        dest="memory_monitor_sample_interval_seconds",
+                        action="store",
+                        default=10,
+                        type=int,
+                        help="How often (in seconds) to sample memory usage.")
+
+
+
+
+def verify_cli_arguments(options):
+    # port is not available on Windows
+    if platform != "win32":
+        if options.port == str(options.remote_server_port):
+            raise Exception('Port {} is reserved for Robot Framework remote server and cannot be used for remote debugging.'.format(options.remote_server_port))
+        if options.port is not None and options.jobs != 1:
+            raise Exception("Debug port cannot be used in parallel runs")
+
+    if options.css_file:
+        if not os.path.isabs(options.css_file):
+            options.css_file = os.path.join(this_path, options.css_file)
+
+        if not os.path.isfile(options.css_file):
+            raise Exception("Unable to find provided CSS file: {0}.".format(options.css_file))
+
+    if options.remote_server_port != 0 and options.jobs != 1:
+        raise Exception("Parallel execution and fixed Robot port number options cannot be used together")
+
+def is_process_running(pid):
+    if not psutil.pid_exists(pid):
+        return False
+    proc = psutil.Process(pid)
+    # docs note: is_running() will return True also if the process is a zombie (p.status() == psutil.STATUS_ZOMBIE)
+    return proc.is_running() and proc.status() != psutil.STATUS_ZOMBIE
+
+
+def is_port_available(port, autokill):
+    port_handle = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    available = False
+    try:
+        port_handle.bind(("localhost", port))
+        port_handle.close()
+        available = True
+    except:
+        available = can_be_freed_by_killing_other_job(port, autokill)
+    return available
+
+
+def can_be_freed_by_killing_other_job(port, autokill):
+    if not sys.stdin.isatty():
+        return
+    try:
+        for proc in [psutil.Process(pid) for pid in psutil.pids()]:
+            if '--robot-server-port' in proc.cmdline() and str(port) in proc.cmdline():
+                if not is_process_running(proc.pid):
+                    # process is zombie
+                    continue
+
+                if autokill:
+                    result = 'y'
+                else:
+                    print('It seems that Renode process (pid {}, name {}) is currently running on port {}'.format(proc.pid, proc.name(), port))
+                    result = input('Do you want me to kill it? [y/N] ')
+
+                if result in ['Y', 'y']:
+                    proc.kill()
+                    return True
+                break
+    except Exception:
+        # do nothing here
+        pass
+    return False
+
+def report_dead_subprocess(process):
+    exception_message = "\n".join([
+                                  f"{process.executable} process died(pid == -1)?? Here are some details",
+                                  f"\t stdout = {process.stdout}",
+                                  f"\t stderr = {process.stderr}",
+                                  f"\t return code = {process.returncode}"])
+    raise RuntimeError(exception_message)
+
+
+class KeywordsFinder(robot.model.SuiteVisitor):
+    def __init__(self, keyword):
+        self.keyword = keyword
+        self.occurences = 0
+        self.arguments = []
+
+
+    def visit_keyword(self, keyword):
+        if keyword.name == self.keyword:
+            self.occurences += 1
+            arguments = keyword.args
+            self.arguments.append(arguments)
+
+
+    def got_results(self):
+        return self.occurences > 0
+
+
+class TestsFinder(robot.model.SuiteVisitor):
+    def __init__(self, keyword):
+        self.keyword = keyword
+        self.tests_matching = []
+        self.tests_not_matching = []
+
+
+    def isMatching(self, test):
+        finder = KeywordsFinder(self.keyword)
+        test.visit(finder)
+        return finder.got_results()
+
+
+    def visit_test(self, test):
+        if self.isMatching(test):
+            self.tests_matching.append(test)
+        else:
+            self.tests_not_matching.append(test)
+
+
+class RobotTestSuite(object):
+    after_timeout_message_suffix = ' '.join([
+        "Failed on Renode restarted after timeout,",
+        "will be retried if `-N/--retry` option was used."
+    ])
+    instances_count = 0
+    robot_frontend_process = None
+    renode_pid = -1  # It's not always robot_frontend_process.pid, e.g., with `--run-gdb` option.
+    hotspot_action = ['None', 'Pause', 'Serialize']
+    # Used to share the port between all suites when running sequentially
+    remote_server_port = -1
+    retry_test_regex = re.compile(r"\[RETRY\] (PASS|FAIL) on (\d+)\. retry\.")
+    retry_suite_regex = re.compile(r"|".join((
+            r"\[Errno \d+\] Connection refused",
+            r"Connection to remote server broken: \[WinError \d+\]",
+            r"Connecting remote server at [^ ]+ failed",
+            "Getting keyword names from library 'Remote' failed",
+            after_timeout_message_suffix,
+    )))
+    timeout_expected_tag = 'timeout_expected'
+
+    def __init__(self, path):
+        self.path = path
+        self.known_unstable: Optional[KnownUnstableSuite] = None
+        self._dependencies_met = set()
+        self.remote_server_directory = None
+        # Subset of RobotTestSuite.log_files which are "owned" by the running instance
+        self.suite_log_files = None
+
+        self.tests_with_hotspots = []
+        self.tests_without_hotspots = []
+
+
+    def get_output_dir(self, options, iteration_index, suite_retry_index):
+        return os.path.join(
+            options.results_directory,
+            f"iteration{iteration_index}" if options.iteration_count > 1 else "",
+            f"retry{suite_retry_index}" if options.retry_count > 1 else "",
+        )
+
+
+    def prepare(self, options):
+        RobotTestSuite.instances_count += 1
+
+        hotSpotTestFinder = TestsFinder(keyword="Handle Hot Spot")
+        suiteBuilder = robot.running.builder.TestSuiteBuilder()
+        suite = suiteBuilder.build(self.path)
+        suite.visit(hotSpotTestFinder)
+
+        self.tests_with_hotspots = [test.name for test in hotSpotTestFinder.tests_matching]
+        self.tests_without_hotspots = [test.name for test in hotSpotTestFinder.tests_not_matching]
+
+        # In parallel runs, Renode is started for each suite.
+        # The same is done in sequential runs with --keep-renode-output.
+        # see: run
+        if options.jobs == 1 and not options.keep_renode_output:
+            if not RobotTestSuite._is_frontend_running():
+                RobotTestSuite.robot_frontend_process = self._run_remote_server(options)
+            else:
+                # Restore port allocated by a previous suite
+                self.remote_server_port = RobotTestSuite.remote_server_port
+
+
+    @classmethod
+    def _is_frontend_running(cls):
+        return cls.robot_frontend_process is not None and is_process_running(cls.robot_frontend_process.pid)
+
+
+    def _run_remote_server(self, options, iteration_index=1, suite_retry_index=0):
+        # Let's reset PID and check it's set before returning to prevent keeping old PID.
+        self.renode_pid = -1
+
+        prepend_dotnet = options.remote_server_name.endswith('.dll')
+
+        self.remote_server_directory = options.remote_server_full_directory
+        remote_server_binary = os.path.join(self.remote_server_directory, options.remote_server_name)
+
+        if not os.path.isfile(remote_server_binary):
+            raise Exception("Robot framework remote server binary not found: '{}'! Did you forget to build?".format(remote_server_binary))
+
+        remote_server_port = options.remote_server_port
+
+        if remote_server_port != 0 and not is_port_available(remote_server_port, options.autokill_renode):
+            raise Exception("The selected port {} is not available".format(remote_server_port))
+
+        command = [remote_server_binary, '--robot-server-port', str(remote_server_port)]
+        if not options.show_log and not options.keep_renode_output:
+            command.append('--hide-log')
+        if not options.enable_xwt:
+            command.append('--disable-gui')
+        if options.debug_on_error:
+            command.append('--robot-debug-on-error')
+        if options.keep_temps:
+            command.append('--keep-temporary-files')
+        if options.renode_config:
+            command.append('--config')
+            command.append(options.renode_config)
+
+        if prepend_dotnet:
+            command.insert(0, 'dotnet')
+
+        renode_command = command
+        stdout_path, stderr_path = None, None
+
+        # if we started GDB, wait for the user to start Renode as a child process
+        if options.run_gdb:
+            command = ['gdb', '-nx', '-ex', 'handle SIG34 nostop noprint', '--args'] + command
+            process = psutil.Popen(command, cwd=self.remote_server_directory, bufsize=1)
+
+            if options.keep_renode_output:
+                print("Note: --keep-renode-output is not supported when using --run-gdb")
+
+            if process.pid == -1:
+                report_dead_subprocess(process)
+
+            print("Waiting for Renode process to start")
+            while True:
+                # We strip argv[0] because if we pass just `mono` to GDB it will resolve
+                # it to a full path to mono on the PATH, for example /bin/mono
+                renode_child = next((c for c in process.children() if c.cmdline()[1:] == renode_command[1:]), None)
+                if renode_child:
+                    break
+                sleep(0.5)
+            self.renode_pid = renode_child.pid
+        elif options.perf_output_path:
+            pid_file_uuid = uuid.uuid4()
+            pid_filename = f'pid_file_{pid_file_uuid}'
+
+            command = ['perf', 'record', '-q', '-g', '-F', 'max'] + command + ['--pid-file', pid_filename]
+
+            stdout_path = "perf_stdout_stderr"
+
+            if options.keep_renode_output:
+                print("Note: --keep-renode-output is not supported when using --perf-output-path")
+
+            print(f"WARNING: perf stdout and stderr is being redirected to {stdout_path}")
+
+            perf_stdout_stderr_file = open(stdout_path, "w")
+            process = subprocess.Popen(command, cwd=self.remote_server_directory, bufsize=1, stdout=perf_stdout_stderr_file, stderr=perf_stdout_stderr_file, creationflags=CREATE_NEW_PROCESS_GROUP)
+
+            pid_file_path = os.path.join(self.remote_server_directory, pid_filename)
+            perf_renode_timeout = 10
+
+            if process.pid == -1:
+                report_dead_subprocess(process)
+
+            while not os.path.exists(pid_file_path) and perf_renode_timeout > 0:
+                sleep(0.5)
+                perf_renode_timeout -= 1
+
+            if perf_renode_timeout <= 0:
+                raise RuntimeError("Renode pid file could not be found, can't attach perf")
+
+            with open(pid_file_path, 'r') as pid_file:
+                self.renode_pid = pid_file.read()
+        else:
+            # Start Renode
+            file_name = os.path.splitext(os.path.basename(self.path))[0]
+            os.environ["GCOV_PREFIX"] = os.path.join(os.getcwd(), f"output/coverage/{file_name}")
+            if options.keep_renode_output:
+                output_dir = self.get_output_dir(options, iteration_index, suite_retry_index)
+                logs_dir = os.path.join(output_dir, 'logs')
+                os.makedirs(logs_dir, exist_ok=True)
+                suite_name = RobotTestSuite._create_suite_name(file_name, None)
+                stdout_path = os.path.join(logs_dir, f"{suite_name}.renode_stdout.log")
+                stderr_path = os.path.join(logs_dir, f"{suite_name}.renode_stderr.log")
+                fout = open(stdout_path, "wb", buffering=0)
+                ferr = open(stderr_path, "wb", buffering=0)
+                process = subprocess.Popen(command, cwd=self.remote_server_directory, bufsize=1, stdout=fout, stderr=ferr, creationflags=CREATE_NEW_PROCESS_GROUP)
+                if process.pid == -1:
+                    report_dead_subprocess(process)
+
+                self.renode_pid = process.pid
+            else:
+                process = subprocess.Popen(command, cwd=self.remote_server_directory, bufsize=1, creationflags=CREATE_NEW_PROCESS_GROUP)
+                if process.pid == -1:
+                    report_dead_subprocess(process)
+                self.renode_pid = process.pid
+
+        assert self.renode_pid != -1, "Renode PID has to be set before trying to acces the port file"
+
+        if options.enable_resource_monitoring:
+            initial_delay = options.memory_monitor_initial_delay_seconds
+            interval = options.memory_monitor_sample_interval_seconds
+            monitor = ProcessMemoryMonitor(
+                int(self.renode_pid), 
+                initial_delay,
+                interval 
+            )
+            monitor.start()
+
+            # Assign to either a local or global instance, depending on if we're running with
+            # multiple Renode instances or just a single one.
+            has_multiple_renode_instances = options.jobs != 1 or options.keep_renode_output
+            if has_multiple_renode_instances:
+                self.renode_memory_monitor = monitor
+            else:
+                RobotTestSuite.renode_memory_monitor = monitor
+
+        timeout_s = 180
+        countdown = float(timeout_s)
+        temp_dir = tempfile.gettempdir()
+        renode_port_file = os.path.join(temp_dir, f'renode-{self.renode_pid}', 'robot_port')
+        while countdown > 0:
+            try:
+                with open(renode_port_file, 'r') as f:
+                    port_num = f.readline()
+                    if port_num == '':
+                        continue
+                    self.remote_server_port = int(port_num)
+                break
+            except (FileNotFoundError, PermissionError):
+                sleep(0.5)
+                countdown -= 0.5
+        else:
+            # PID is preserved for error message as the field gets reset in `self._close_remote_server`.
+            process_pid = self.renode_pid
+            self.log_process_data(process, stdout_path, stderr_path)
+            self._close_remote_server(process, options)
+            raise TimeoutError(f"Couldn't access port file for Renode instance pid {process_pid}; timed out after {timeout_s}s")
+
+        # If a certain port was expected, let's make sure Renode uses it.
+        if remote_server_port and remote_server_port != self.remote_server_port:
+            self._close_remote_server(process, options)
+            raise RuntimeError(f"Renode was expected to use port {remote_server_port} but {self.remote_server_port} port is used instead!")
+
+        RobotTestSuite.remote_server_port = self.remote_server_port
+        return process
+
+    def log_process_data(self, process, stdout_path, stderr_path):
+        process.poll()
+
+        separator = "=" * 80
+        process_summary = "\n".join(
+            [
+                separator,
+                f"Process `{' '.join(process.args)}` [pid: {process.pid}] state:",
+                f"return code: {process.returncode}",
+            ]
+        )
+        if stdout_path:
+            with open(stdout_path, 'rt') as stdout:
+                process_summary += f"\nstdout: \n{stdout.read()}"
+        if stderr_path:
+            with open(stderr_path, 'rt') as stderr:
+                process_summary += f"\nstderr: \n{stderr.read()}"
+        process_summary += separator
+        print(process_summary)
+
+    def __move_perf_data(self, options):
+        perf_data_path = os.path.join(self.remote_server_directory, "perf.data")
+
+        if not perf_data_path:
+            raise RuntimeError("perf.data file was not generated succesfully")
+
+        if not os.path.isdir(options.perf_output_path):
+            raise RuntimeError(f"{options.perf_output_path} is not a valid directory path")
+
+        shutil.move(perf_data_path, options.perf_output_path)
+
+    def _close_remote_server(self, proc, options):
+        if not proc:
+            return
+
+        if options.enable_resource_monitoring:
+            if self.renode_memory_monitor is not None:
+                self.renode_memory_monitor.stop()
+            elif RobotTestSuite.renode_memory_monitor is not None:
+                RobotTestSuite.renode_memory_monitor.stop()
+
+        renode = f"Renode pid {proc.pid}"
+        renode_killed = False
+
+        # Let's prevent using these after the server is closed.
+        self.robot_frontend_process = None
+        self.renode_pid = -1
+        self.remote_server_port = -1
+
+        # None of the previously provided states will be available.
+        self._dependencies_met = set()
+
+        # poll returns exit code if process exited which means it doesn't need to be closed.
+        if (exit_code := proc.poll()) is None:
+            print(f"Closing {renode}")
+            try:
+                process = psutil.Process(proc.pid)
+                os.kill(proc.pid, signal.SIGINT)
+                process.wait(timeout=options.cleanup_timeout)
+
+                if options.perf_output_path:
+                    self.__move_perf_data(options)
+            except psutil.TimeoutExpired:
+                print(f"{renode} didn't close in {options.cleanup_timeout}s, killing it")
+                process.kill()
+
+                try:
+                    process.wait(timeout=options.kill_timeout)
+                    renode_killed = True
+                except psutil.TimeoutExpired:
+                    raise RuntimeError(f"{renode} didn't react to kill in {options.kill_timeout}s")
+
+        if options.perf_output_path and proc.stdout:
+            proc.stdout.close()
+
+        if exit_code:
+            print(f"{renode} exited before close request, exit code: {exit_code}")
+        elif renode_killed:
+            print(f"{renode} killed")
+        else:
+            print(f"{renode} closed")
+
+    @staticmethod
+    def _is_retried_attempt(test: ET.Element) -> bool:
+        """Whether this `test` element is a non-final attempt of a test retried with `-N/--retry`.
+
+        Only the last attempt carries the test's final verdict; the earlier ones are kept
+        in the output for their failure messages and logs."""
+        return any(tag.text == TestTag.RETRIED_ATTEMPT for tag in test.findall('tag'))
+
+    @classmethod
+    def _has_renode_crashed(cls, test: ET.Element) -> bool:
+        # only finds immediate children - required because `status`
+        # nodes are also present lower in the tree for example
+        # for every keyword but we only need the status of the test
+        status: ET.Element = test.find('status')
+        if status.text is not None and cls.retry_suite_regex.search(status.text):
+            return True
+        else:
+            return any(cls.retry_suite_regex.search(msg.text) for msg in test.iter("msg"))
+
+
+    def run(self, options, iteration_index=1, suite_retry_index=0):
+        if self.path.endswith('renode-keywords.robot'):
+            print('Ignoring helper file: {}'.format(self.path))
+            return True
+
+        tests_len = 0
+        suites_with_hotspots = []
+        if any(self.tests_without_hotspots):
+            suite_without_hotspots = self._get_test_suite(options, self.tests_without_hotspots, options.fixture, None)
+            tests_len = len(suite_without_hotspots.tests)
+        if any(self.tests_with_hotspots):
+            for hotspot in RobotTestSuite.hotspot_action:
+                if options.hotspot and options.hotspot != hotspot:
+                    continue
+                suite_with_hotspots = self._get_test_suite(options, self.tests_with_hotspots, options.fixture, hotspot)
+                suites_with_hotspots.append((hotspot, suite_with_hotspots))
+                tests_len += len(suite_with_hotspots.tests)
+
+        if tests_len == 0:
+            return TestResult(True, [])
+
+        # The list is cleared only on the first run attempt in each iteration so
+        # that tests that time out aren't retried in the given iteration but are
+        # started as usual in subsequent iterations.
+        if suite_retry_index == 0:
+            self.tests_with_unexpected_timeouts = []
+
+        # in non-parallel runs there is only one Renode process for all runs,
+        # unless --keep-renode-output is enabled, in which case a new process
+        # is spawned for every suite to ensure logs are separate files.
+        # see: prepare
+        if options.jobs != 1 or options.keep_renode_output:
+            # Parallel groups run in separate processes so these aren't really
+            # shared, they're only needed to restart Renode in timeout handler.
+            RobotTestSuite.robot_frontend_process = self._run_remote_server(options, iteration_index, suite_retry_index)
+
+        print(f'Running suite on Renode pid {self.renode_pid} using port {self.remote_server_port}: {self.path}')
+
+        result = None
+        def get_result():
+            return result if result is not None else TestResult(True, None)
+
+        start_timestamp = monotonic()
+
+        if any(self.tests_without_hotspots):
+            result = get_result().ok and self._run_inner(suite_without_hotspots,
+                                                         options.fixture,
+                                                         None,
+                                                         self.tests_without_hotspots,
+                                                         options,
+                                                         iteration_index,
+                                                         suite_retry_index)
+        for hotspot, suite in suites_with_hotspots:
+                result = get_result().ok and self._run_inner(suite,
+                                                             options.fixture,
+                                                             hotspot,
+                                                             self.tests_with_hotspots,
+                                                             options,
+                                                             iteration_index,
+                                                             suite_retry_index)
+
+        end_timestamp = monotonic()
+
+        if result is None:
+            print(f'No tests executed for suite {self.path}', flush=True)
+        else:
+            status = 'finished successfully' if result.ok else 'failed'
+            exec_time = round(end_timestamp - start_timestamp, 2)
+            print(f'Suite {self.path} {status} in {exec_time} seconds.', flush=True)
+
+        renode_memory_stats = {}
+        renode_process_stats = {}
+        if options.enable_resource_monitoring:
+            has_multiple_renode_instances = options.jobs != 1 or options.keep_renode_output
+            if has_multiple_renode_instances:
+                renode_pid = int(self.renode_pid)
+                monitor = self.renode_memory_monitor
+            else:
+                renode_pid = int(RobotTestSuite.robot_frontend_process.pid)
+                monitor = RobotTestSuite.renode_memory_monitor
+
+            if renode_pid != -1:
+                renode_memory_stats = {"peak_unique_set_size_bytes": monitor.get_peak_and_reset()}
+                try:
+                    renode_process = psutil.Process(renode_pid)
+                    stats = collect_process_stats(renode_process)
+                    renode_process_stats = stats.to_metadata() if stats else {}
+                except psutil.NoSuchProcess as err:
+                    print(f"error: Failed to collect process statistics for PID `{renode_pid}`: {err}")
+
+        logs = get_result()[1]
+        for log in logs: 
+            try: 
+                robot_results = robot.api.ExecutionResult(log)
+            except robot.errors.DataError as err:
+                print(f"error: Failed to read robot output xml `{log}`: {err}")
+                continue
+
+            suite = robot_results.suite
+
+            process_metadata = renode_process_stats | renode_memory_stats 
+            stringified_process_metadata = {key: str(value) for key, value in process_metadata.items()}
+
+            suite.metadata.update(stringified_process_metadata)
+            robot_results.save()
+
+        if options.jobs != 1 or options.keep_renode_output:
+            self._close_remote_server(RobotTestSuite.robot_frontend_process, options)
+
+        # make sure renode is still alive when a non-parallel run depends on it
+        if options.jobs == 1 and not options.keep_renode_output:
+            if not self._is_frontend_running():
+                print("Renode has unexpectedly died when running sequentially! Trying to respawn before continuing...")
+                RobotTestSuite.robot_frontend_process = self._run_remote_server(options, iteration_index, suite_retry_index)
+
+        return get_result()
+
+
+    def _get_dependencies(self, test_case):
+
+        suiteBuilder = robot.running.builder.TestSuiteBuilder()
+        suite = suiteBuilder.build(self.path)
+        test = next(t for t in suite.tests if hasattr(t, 'name') and t.name == test_case)
+        requirements = [s.args[0] for s in test.body if hasattr(s, 'name') and s.name == 'Requires']
+        if len(requirements) == 0:
+            return set()
+        if len(requirements) > 1:
+            raise Exception('Too many requirements for a single test. At most one is allowed.')
+        providers = [t for t in suite.tests if any(hasattr(s, 'name') and s.name == 'Provides' and s.args[0] == requirements[0] for s in t.body)]
+        if len(providers) > 1:
+            raise Exception('Too many providers for state {0} found: {1}'.format(requirements[0], ', '.join(providers.name)))
+        if len(providers) == 0:
+            raise Exception('No provider for state {0} found'.format(requirements[0]))
+        res = self._get_dependencies(providers[0].name)
+        res.add(providers[0].name)
+        return res
+
+
+    def cleanup(self, options):
+        assert hasattr(RobotTestSuite, "log_files"), "tests_engine.py did not assign RobotTestSuite.log_files"
+        RobotTestSuite.instances_count -= 1
+        if RobotTestSuite.instances_count == 0:
+            self._close_remote_server(RobotTestSuite.robot_frontend_process, options)
+            print("Aggregating all robot results")
+            grouped_log_files = self.group_log_paths(RobotTestSuite.log_files)
+            for iteration in range(1, options.iteration_count + 1):
+                for retry in range(options.retry_count):
+                    output_dir = self.get_output_dir(options, iteration, retry)
+                    log_files = grouped_log_files[(iteration, retry)]
+
+                    # An output_dir can be missing for suite retries that were never "used"
+                    if not os.path.isdir(output_dir) or not log_files:
+                        continue
+
+                    robot.rebot(
+                        *log_files,
+                        processemptysuite=True,
+                        name='Test Suite',
+                        loglevel="TRACE:INFO",
+                        outputdir=output_dir,
+                        output='robot_output.xml'
+                    )
+                    for file in set(log_files):
+                        os.remove(file)
+                    if options.css_file:
+                        with open(options.css_file) as style:
+                            style_content = style.read()
+                            for report_name in ("report.html", "log.html"):
+                                with open(os.path.join(output_dir, report_name), "a") as report:
+                                    report.write("<style media=\"all\" type=\"text/css\">")
+                                    report.write(style_content)
+                                    report.write("</style>")
+
+
+            if options.keep_renode_output:
+                logs_pattern = re.compile(r"(?P<suite_name>.*)\.renode_std(out|err)\.log")
+                for dirpath, _, fnames in os.walk(options.results_directory):
+                    if os.path.basename(dirpath.rstrip("/")) != "logs":
+                        continue
+
+                    failed_suites = self.find_suites_with_fails(os.path.dirname(dirpath))
+                    for fname in fnames:
+                        fpath = os.path.join(dirpath, fname)
+                        m = logs_pattern.match(fname)
+                        if m:
+                            # Remove empty logs
+                            if os.path.getsize(fpath) == 0:
+                                os.remove(fpath)
+                                continue
+
+                            if options.save_logs == "onfail":
+                                # Remove logs which weren't failures
+                                suite_name = m.group("suite_name")
+                                if suite_name not in failed_suites:
+                                    os.remove(fpath)
+
+                    # If the logs directory is empty, delete it
+                    try:
+                        os.rmdir(dirpath)
+                    except OSError:
+                        pass
+
+
+    def should_retry_suite(self, options, iteration_index, suite_retry_index):
+        tree = None
+        assert self.suite_log_files is not None, "The suite has not yet been run."
+        output_dir = self.get_output_dir(options, iteration_index, suite_retry_index)
+        for log_file in self.suite_log_files:
+            try:
+                tree = ET.parse(os.path.join(output_dir, log_file))
+            except FileNotFoundError as e:
+                raise e
+
+            root = tree.getroot()
+            for suite in root.iter('suite'):
+                if not suite.get('source', False):
+                    continue # it is a tag used to group other suites without meaning on its own
+
+                # Always retry if our Setup failed.
+                for kw in suite.iter('kw'):
+                    if kw.get('name') == 'Setup' and kw.get('library') == 'renode-keywords':
+                        if kw.find('status').get('status') != 'PASS':
+                            print('Renode Setup failure detected!')
+                            return True
+                        else:
+                            break
+
+                # Look for regular expressions signifying a crash.
+                # Suite Setup and Suite Teardown aren't checked here cause they're in the `kw` tags.
+                # Attempts recovered by a test-level retry don't warrant rerunning the suite.
+                for test in suite.iter('test'):
+                    if not self._is_retried_attempt(test) and self._has_renode_crashed(test):
+                        return True
+
+        return False
+
+
+    @staticmethod
+    def _create_suite_name(test_name, hotspot):
+        return test_name + (' [HotSpot action: {0}]'.format(hotspot) if hotspot else '')
+
+    def _run_dependencies(self, test_cases_names, options, iteration_index=1, suite_retry_index=0):
+        test_cases_names.difference_update(self._dependencies_met)
+        if not any(test_cases_names):
+            return True
+        self._dependencies_met.update(test_cases_names)
+        suite = self._get_test_suite(options, test_cases_names, None, None)
+        return self._run_inner(suite, None, None, test_cases_names, options, iteration_index, suite_retry_index)
+
+    def _get_test_suite(self, options, test_cases_names, fixture, hotspot):
+        file_name = os.path.splitext(os.path.basename(self.path))[0]
+        suite_name = RobotTestSuite._create_suite_name(file_name, hotspot)
+
+        test_cases = [(test_name, '{0}.{1}'.format(suite_name, test_name)) for test_name in test_cases_names]
+        if fixture:
+            test_cases = [x for x in test_cases if fnmatch.fnmatch(x[1], '*' + fixture + '*')]
+        suite_builder = robot.running.builder.TestSuiteBuilder()
+        suite = suite_builder.build(self.path)
+        suite.resource.imports.create(type="Resource", name=keywords_path)
+
+        metadata = {"HotSpot_Action": hotspot if hotspot else '-'}
+        suite.configure(include_tags=options.include, exclude_tags=options.exclude,
+                            include_tests=[t[1] for t in test_cases], metadata=metadata,
+                            name=suite_name, empty_suite_ok=True)
+        # Provide default values for {Suite,Test}{Setup,Teardown}
+        if not suite.setup:
+            suite.setup.config(name="Setup")
+        if not suite.teardown:
+            suite.teardown.config(name="Teardown")
+        return suite
+
+    def _run_inner(self, suite, fixture, hotspot, test_cases_names, options, iteration_index=1, suite_retry_index=0):
+        file_name = os.path.splitext(os.path.basename(self.path))[0]
+        suite_name = RobotTestSuite._create_suite_name(file_name, hotspot)
+
+        output_dir = self.get_output_dir(options, iteration_index, suite_retry_index)
+        variables = [
+            'SKIP_RUNNING_SERVER:True',
+            'DIRECTORY:{}'.format(self.remote_server_directory),
+            'PORT_NUMBER:{}'.format(self.remote_server_port),
+            'RESULTS_DIRECTORY:{}'.format(output_dir),
+            'BINARY_NAME:{}'.format(options.remote_server_name),
+            'RENODE_PID:{}'.format(self.renode_pid),
+        ]
+        if hotspot:
+            variables.append('HOTSPOT_ACTION:' + hotspot)
+        if options.debug_mode:
+            variables.append('CONFIGURATION:Debug')
+        if options.debug_on_error:
+            variables.append('HOLD_ON_ERROR:True')
+        if options.execution_metrics:
+            variables.append('CREATE_EXECUTION_METRICS:True')
+        if options.save_logs == "always":
+            variables.append('SAVE_LOGS_WHEN:Always')
+
+        if options.variables:
+            variables += options.variables
+
+        if self.known_unstable:
+            # We still run known-unstable tests, but they're allowed to fail.
+            for unstable_test in filter_unstable(self.known_unstable, suite.tests):
+                unstable_test.tags.add(TestTag.UNSTABLE)
+
+        test_cases = [(test.name, '{0}.{1}'.format(suite_name, test.name)) for test in suite.tests]
+        if fixture:
+            deps = set()
+            for test_name in (t[0] for t in test_cases):
+                deps.update(self._get_dependencies(test_name))
+            if not self._run_dependencies(deps, options, iteration_index, suite_retry_index):
+                return TestResult(False, None)
+
+        # Listeners are called in the exact order as in `listeners` list for both `start_test` and `end_test`.
+        output_formatter = 'robot_output_formatter_verbose.py' if options.verbose else 'robot_output_formatter.py'
+        listeners = [
+            os.path.join(this_path, f'retry_and_timeout_listener.py:{options.retry_count}'),
+            # Has to be the last one to print final state, message etc. after all the changes made by other listeners.
+            os.path.join(this_path, output_formatter),
+        ]
+        if options.listener:
+            listeners += options.listener
+
+        log_file = os.path.join(output_dir, 'results-{0}{1}.robot.xml'.format(file_name, '_' + hotspot if hotspot else ''))
+
+        # This variable is provided for compatibility with Robot files that use Resource ${RENODEKEYWORDS}
+        variables.append('RENODEKEYWORDS:{}'.format(keywords_path))
+        tools_path = os.path.join(os.path.dirname(this_path), "tools")
+        tools_path = tools_path.replace(os.path.sep, "/")
+        variables.append('RENODETOOLS:{}'.format(tools_path))
+
+        for test in suite.tests:
+            if not test.setup:
+                test.setup.config(name="Test Setup")
+            if not test.teardown:
+                test.teardown.config(name="Test Teardown")
+
+            # Let's just fail tests which previously unexpectedly timed out.
+            if test.name in self.tests_with_unexpected_timeouts:
+                test.config(setup=None, teardown=None)
+                test.body.clear()
+                test.body.create_keyword('Fail', ["Test timed out in a previous run and won't be retried."])
+
+                # This tag tells `RetryFailed` max retries for this test.
+                if 'test:retry' in test.tags:
+                    test.tags.remove('test:retry')
+                test.tags.add('test:retry(0)')
+
+            if any(tag in options.skip for tag in test.tags):
+                test.tags.add('robot:skip')
+
+            # Timeout tests with `self.timeout_expected_tag` will be set as passed in the listener
+            # during timeout handling. Their timeout won't be influenced by the global timeout option.
+            if self.timeout_expected_tag in test.tags:
+                if not test.timeout:
+                    raise Exception(f"!!!!! Test with a `{self.timeout_expected_tag}` tag must have `[Timeout]` set: {test.longname}")
+            elif options.timeout:
+                # Timeout from tags is used if it's shorter than the global timeout.
+                if not test.timeout or Time(test.timeout).seconds >= options.timeout.seconds:
+                    test.timeout = options.timeout.value
+
+        # Timeout handler is used in `retry_and_timeout_listener.py` and, to be able to call it,
+        # `self` is smuggled in suite's `parent` which is typically None for the main suite.
+        # Listener grabs it on suite start and resets to original value.
+        suite.parent = (self, suite.parent)
+        self.timeout_handler = self._create_timeout_handler(options, iteration_index, suite_retry_index)
+
+        result = suite.run(console='none', listener=listeners, exitonfailure=options.stop_on_error, output=log_file, log=None, loglevel='TRACE', report=None, variable=variables, skiponfailure=[TestTag.NON_CRITICAL, TestTag.SKIPPED, TestTag.UNSTABLE])
+
+        self.suite_log_files = []
+        file_name = os.path.splitext(os.path.basename(self.path))[0]
+        output_dir = self.get_output_dir(options, iteration_index, suite_retry_index)
+        if any(self.tests_without_hotspots):
+            log_file = os.path.join(output_dir, 'results-{0}.robot.xml'.format(file_name))
+            if os.path.isfile(log_file):
+                self.suite_log_files.append(log_file)
+        if any(self.tests_with_hotspots):
+            for hotspot in RobotTestSuite.hotspot_action:
+                if options.hotspot and options.hotspot != hotspot:
+                    continue
+                log_file = os.path.join(output_dir, 'results-{0}{1}.robot.xml'.format(file_name, '_' + hotspot if hotspot else ''))
+                if os.path.isfile(log_file):
+                    self.suite_log_files.append(log_file)
+
+        return TestResult(result.return_code == 0, self.suite_log_files)
+
+    def _create_timeout_handler(self, options, iteration_index, suite_retry_index):
+        def _timeout_handler(test: robot.running.TestCase, result: robot.result.TestCase):
+            if self.timeout_expected_tag in test.tags:
+                message_start = '----- Test timed out, as expected,'
+            else:
+                # Let's make the first message stand out if the timeout wasn't expected.
+                message_start = '!!!!! Test timed out'
+
+                # Tests with unexpected timeouts won't be retried.
+                self.tests_with_unexpected_timeouts = test.name
+            print(f"{message_start} after {Time(test.timeout).seconds}s: {test.parent.name}.{test.name}")
+            BuiltIn().run_keyword("Print Log Saved Message")
+            print(f"----- Skipped saving state due to the timeout, restarting Renode...")
+
+            self._close_remote_server(RobotTestSuite.robot_frontend_process, options)
+            RobotTestSuite.robot_frontend_process = self._run_remote_server(options, iteration_index, suite_retry_index)
+
+            # Point the already-imported Renode (Remote) library at the new port.
+            # The library was imported once in `Setup` (renode-keywords.robot) with
+            # the URI baked into the XmlRpcRemoteClient. Each XML-RPC call builds a
+            # fresh ServerProxy from `client.uri`, so we just rewrite that attribute.
+            # Preserve the original host (127.0.0.1 on Linux, localhost on Windows -
+            # see renode-keywords.robot) by reading it off the existing URI.
+            BuiltIn().set_suite_variable('$PORT_NUMBER', str(self.remote_server_port))
+            renode_lib = BuiltIn().get_library_instance('Renode')
+            parsed = urllib.parse.urlparse(renode_lib._client.uri)
+            new_uri = parsed._replace(netloc=f'{parsed.hostname}:{self.remote_server_port}').geturl()
+            renode_lib._uri = new_uri
+            renode_lib._client.uri = new_uri
+
+            # It's typically used in suite setup (renode-keywords.robot:Setup) but we don't need to
+            # call full setup which imports library etc. We only need to resend settings to Renode.
+            BuiltIn().run_keyword("Setup Renode")
+            print(f"----- ...done, running remaining tests on Renode pid {self.renode_pid} using port {self.remote_server_port}")
+        return _timeout_handler
+
+    def tests_failed_due_to_renode_crash(self) -> bool:
+        # Return false if the test has not yet run
+        if self.suite_log_files is None:
+            return
+        for file in self.suite_log_files:
+            try:
+                tree = ET.parse(file)
+            except FileNotFoundError:
+                continue
+
+            root = tree.getroot()
+
+            for suite in root.iter('suite'):
+                if not suite.get('source', False):
+                    continue # it is a tag used to group other suites without meaning on its own
+                for test in suite.iter('test'):
+                    tags = [tag.text for tag in test.findall('tag') if tag.text is not None]
+                    # do not check skipped tests
+                    if TestTag.SKIPPED in tags:
+                        continue
+
+                    # only finds immediate children - required because `status`
+                    # nodes are also present lower in the tree for example
+                    # for every keyword but we only need the status of the test
+                    status = test.find('status')
+                    if status.attrib["status"] != "FAIL":
+                        continue # passed tests should not be checked for crashes
+
+                    # check whether renode crashed during this test
+                    if self._has_renode_crashed(test):
+                        return True
+
+        return False
+
+
+    @staticmethod
+    def find_failed_tests(path, file="robot_output.xml"):
+        ret = {CRITICAL_TEST: set(), TestTag.NON_CRITICAL: set(), TestTag.UNSTABLE: set()}
+
+        report_paths = [
+            os.path.join(dirpath, fname)
+            for dirpath, _, fnames in os.walk(path)
+            for fname in fnames if fname == file
+        ]
+        # Walk retries in order so a test's last-retry verdict overwrites earlier ones,
+        # otherwise a test that failed early but passed on retry would stay failed.
+        grouped = RobotTestSuite.group_log_paths(report_paths)
+        final = {}
+        for iteration, suite_retry in sorted(grouped):
+            for report_path in grouped[(iteration, suite_retry)]:
+                tree = ET.parse(report_path)
+                root = tree.getroot()
+                for suite in root.iter('suite'):
+                    if not suite.get('source', False):
+                        continue # it is a tag used to group other suites without meaning on its own
+                    for test in suite.iter('test'):
+                        if RobotTestSuite._is_retried_attempt(test):
+                            continue # only the final attempt carries the test's verdict
+                        status_element = test.find('status') # only finds immediate children - important requirement
+                        status = status_element.attrib['status']
+                        test_name = test.attrib['name']
+                        suite_name = suite.attrib['name']
+                        if suite_name == "Test Suite":
+                            # If rebot is invoked with only 1 suite, it renames that suite to Test Suite
+                            # instead of wrapping in a new top-level Test Suite. A workaround is to extract
+                            # the suite name from the *.robot file name.
+                            suite_name = os.path.basename(suite.attrib["source"]).rsplit(".", 1)[0]
+                        qualified_suite_name = f"{suite_name}.{test_name}"
+                        tags = [tag.text for tag in test.findall('tag') if tag.text is not None]
+                        final[(iteration, qualified_suite_name)] = (status, tags)
+
+        for (_, qualified_suite_name), (status, tags) in final.items():
+            if status == 'FAIL':
+                if TestTag.SKIPPED in tags:
+                    continue # skipped test should not be classified as fail
+                if TestTag.NON_CRITICAL in tags:
+                    ret[TestTag.NON_CRITICAL].add(qualified_suite_name)
+                else:
+                    ret[CRITICAL_TEST].add(qualified_suite_name)
+            elif status == "SKIP" and TestTag.UNSTABLE in tags:
+                ret[TestTag.UNSTABLE].add(qualified_suite_name)
+
+        if not ret[CRITICAL_TEST] and not ret[TestTag.NON_CRITICAL] and not ret[TestTag.UNSTABLE]:
+            return None
+        return ret
+
+
+    @classmethod
+    def find_suites_with_fails(cls, path, file="robot_output.xml"):
+        """Finds suites which contain at least one test case failure.
+
+        A suite may be successful and still contain failures, e.g. if the --retry option
+        was used and a test passed on a later attempt."""
+        ret = set()
+
+        for dirpath, _, fnames in os.walk(path):
+            for fname in filter(lambda x: x == file, fnames):
+                tree = ET.parse(os.path.join(dirpath, fname))
+                root = tree.getroot()
+                for suite in root.iter('suite'):
+                    if not suite.get('source', False):
+                        continue  # it is a tag used to group other suites without meaning on its own
+
+                    suite_name = suite.attrib['name']
+                    if suite_name == "Test Suite":
+                        # If rebot is invoked with only 1 suite, it renames that suite to Test Suite
+                        # instead of wrapping in a new top-level Test Suite. A workaround is to extract
+                        # the suite name from the *.robot file name.
+                        suite_name = os.path.basename(suite.attrib["source"]).rsplit(".", 1)[0]
+
+                    for test in suite.iter('test'):
+                        tags = [tag.text for tag in test.findall('tag') if tag.text is not None]
+                        if TestTag.SKIPPED in tags:
+                            continue  # skipped test should not be classified as fail
+                        status = test.find('status')  # only finds immediate children - important requirement
+                        if status.attrib["status"] == "FAIL":
+                            ret.add(suite_name)
+                            break
+                        if status.text is not None and cls.retry_test_regex.search(status.text):
+                            # Retried test cases still count as fails
+                            ret.add(suite_name)
+                            break
+
+        return ret
+
+
+    @staticmethod
+    def group_log_paths(paths: List[str]) -> Dict[Tuple[int, int], Set[str]]:
+        """Breaks a list of log paths into subsets grouped by (iteration, suite_retry) pairs."""
+        re_path_indices_patterns = (
+            re.compile(r"\biteration(?P<iteration>\d+)/retry(?P<suite_retry>\d+)/"),
+            re.compile(r"\bretry(?P<suite_retry>\d+)/"),
+            re.compile(r"\biteration(?P<iteration>\d+)/"),
+        )
+        ret = defaultdict(lambda: set())
+        for path in paths:
+            iteration = 1
+            suite_retry = 0
+            for pattern in re_path_indices_patterns:
+                match = pattern.search(path)
+                if match is None:
+                    continue
+                try:
+                    iteration = int(match.group("iteration"))
+                except IndexError:
+                    pass
+                try:
+                    suite_retry = int(match.group("suite_retry"))
+                except IndexError:
+                    pass
+            ret[(iteration, suite_retry)].add(path)
+        return ret
+
+
+    @classmethod
+    def find_rerun_tests(cls, path):
+
+        def analyze_xml(label, retry_dir, file="robot_output.xml"):
+            try:
+                tree = ET.parse(os.path.join(retry_dir, file))
+            except FileNotFoundError:
+                return
+            root = tree.getroot()
+            for suite in root.iter('suite'):
+                if not suite.get('source', False):
+                    continue # it is a tag used to group other suites without meaning on its own
+                suite_name = suite.attrib['name']
+                if suite_name == "Test Suite":
+                    # If rebot is invoked with only 1 suite, it renames that suite to Test Suite
+                    # instead of wrapping in a new top-level Test Suite. A workaround is to extract
+                    # the suite name from the *.robot file name.
+                    suite_name = os.path.basename(suite.attrib["source"]).rsplit(".", 1)[0]
+                for test in suite.iter('test'):
+                    if cls._is_retried_attempt(test):
+                        continue # attempt counts are read off the final attempt's [RETRY] suffix
+                    test_name = test.attrib['name']
+                    tags = [tag.text for tag in test.findall('tag') if tag.text is not None]
+                    if TestTag.SKIPPED in tags:
+                        continue # skipped test should not be classified as fail
+                    status = test.find('status') # only finds immediate children - important requirement
+                    m = cls.retry_test_regex.search(status.text) if status.text is not None else None
+
+                    # Check whether renode crashed during this test
+                    has_renode_crashed = cls._has_renode_crashed(test)
+
+                    status_str = status.attrib["status"]
+                    nth = (1 + int(m.group(2))) if m else 1
+                    key = f"{suite_name}.{test_name}"
+                    if key not in data:
+                        data[key] = []
+                    data[key].append({
+                        "label": label,        # e.g. "retry0", "retry1", "iteration1/retry2", ...
+                        "status": status_str,  # e.g. "PASS", "FAIL", "SKIP", ...
+                        "nth": nth,            # The number of test case attempts that led to the above status
+                        "tags": tags,          # e.g. ["non_critical"], [], ...
+                        "crash": has_renode_crashed,
+                    })
+
+        def analyze_iteration(iteration_dir):
+            iteration_dirname = os.path.basename(iteration_dir)
+            report_fpath = os.path.join(iteration_dir, "robot_output.xml")
+            if os.path.isfile(report_fpath):
+                analyze_xml(iteration_dirname, iteration_dir)
+                return
+            i = -1
+            while True:
+                i += 1
+                retry_dirpath = os.path.join(iteration_dir, f"retry{i}")
+                if os.path.isdir(retry_dirpath):
+                    analyze_xml(os.path.join(iteration_dirname, f"retry{i}"), retry_dirpath)
+                    continue
+                break
+
+        data = OrderedDict()
+        i = -1
+        while True:
+            i += 1
+            iteration_dirpath = os.path.join(path, f"iteration{i + 1}")
+            retry_dirpath = os.path.join(path, f"retry{i}")
+            if os.path.isdir(iteration_dirpath):
+                analyze_iteration(iteration_dirpath)
+                continue
+            elif os.path.isdir(retry_dirpath):
+                analyze_xml(f"retry{i}", retry_dirpath)
+                continue
+            break
+
+        return data

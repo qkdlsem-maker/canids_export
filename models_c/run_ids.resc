@@ -1,0 +1,12 @@
+mach create "stm32f4"
+machine LoadPlatformDescription @platforms/boards/stm32f4_discovery-kit.repl
+sysbus LoadELF @../fw_test/can_ids_fw.elf
+
+start
+sleep 0.1
+pause
+
+echo "=== 실행 결과 ==="
+sysbus ReadDoubleWord `sysbus GetSymbolAddress "g_done_flag"`
+sysbus ReadDoubleWord `sysbus GetSymbolAddress "g_result"`
+sysbus ReadDoubleWord `sysbus GetSymbolAddress "g_elapsed_cycles"`

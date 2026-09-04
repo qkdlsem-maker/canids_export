@@ -1,0 +1,36 @@
+:name: RAMN
+:description: Runs the RAMN firmware (https://github.com/ToyotaInfoTech/RAMN). By default emulates ECUC but can be overriden by setting $name
+
+$global.name?="ECUC"
+mach create $name
+include @platforms/boards/ramn.repl
+
+if `str_contains $global.name "ECUA"`
+"""
+$bin= @https://dl.antmicro.com/projects/renode/ECUA-watchdog.elf-s_2739268-b034321e255eae4970567b0d80cbc762cd3c47d0
+include @platforms/boards/ramn/GATEWAY.repl
+"""
+
+if `str_contains $global.name "ECUB"`
+"""
+$bin= @https://dl.antmicro.com/projects/renode/ECUB-watchdog.elf-s_2428360-dd5a9fbe172715cc6147563812cb4a66512863cf
+include @platforms/boards/ramn/CHASSIS.repl
+"""
+
+if `str_contains $global.name "ECUC"`
+"""
+$bin= @https://dl.antmicro.com/projects/renode/ECUC-watchdog.elf-s_2420944-e5a465d4581050ce2670fb7c4f2bcbde1710441f
+include @platforms/boards/ramn/POWERTRAIN.repl
+"""
+
+if `str_contains $global.name "ECUD"`
+"""
+$bin= @https://dl.antmicro.com/projects/renode/ECUD-watchdog.elf-s_2443216-be22c20b5133398f62842ff9edcd94f58be5de46
+include @platforms/boards/ramn/BODY.repl
+"""
+
+macro reset
+"""
+sysbus LoadELF $bin
+"""
+runMacro $reset

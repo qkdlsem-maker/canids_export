@@ -1,0 +1,744 @@
+# pylint: disable=C0301,C0103,C0111
+from __future__ import print_function
+from collections import defaultdict, namedtuple
+from sys import platform
+import os
+import sys
+import argparse
+import subprocess
+import yaml
+import multiprocessing
+from typing import Any
+from pathlib import Path
+from enum import Enum
+import segmenting
+import monitoring
+import unstable_tests
+
+this_path = os.path.abspath(os.path.dirname(__file__))
+registered_handlers = []
+TestResult = namedtuple('TestResult', ('ok', 'log_file'))
+shared_suite_counter = None
+shared_active_suites = None
+
+DEFAULT_RENODE_BINARY_NAME = 'Renode.dll' if platform != 'win32' else 'RenodeWPF.dll'
+# Not a TestTag because it's not a real tag, it's the default.
+CRITICAL_TEST = 'mandatory'
+
+class TestTag(str, Enum):
+    SKIPPED = "skipped"
+    NON_CRITICAL = "non_critical"
+    UNSTABLE = "unstable"
+    RETRIED_ATTEMPT = "retried_attempt"
+
+    def __str__(self):
+        return self.value
+
+    def __format__(self, format_spec):
+        return format(self.value, format_spec)
+
+
+class IncludeLoader(yaml.SafeLoader):
+
+    def __init__(self, stream):
+
+        self._root = os.path.split(stream.name)[0]
+
+        super(IncludeLoader, self).__init__(stream)
+
+    def include(self, node):
+        config = self.construct_mapping(node)
+        filename = os.path.join(self._root, config['path'])
+
+        def _append_prefix(lst, prefix):
+            for idx, val in enumerate(lst):
+                if isinstance(val, str):
+                    lst[idx] = os.path.join(prefix, lst[idx])
+                elif isinstance(val, dict):
+                    v = next(iter(val.values()))
+                    _append_prefix(v, prefix)
+                else:
+                    raise Exception('Unsupported list element: ' + val)
+
+        with open(filename, 'r') as f:
+            data = yaml.load(f, IncludeLoader)
+            if data is not None and 'prefix' in config:
+                _append_prefix(data, config['prefix'])
+            return data
+
+
+IncludeLoader.add_constructor('!include', IncludeLoader.include)
+
+
+def prepare_parser():
+    parser = argparse.ArgumentParser(
+        epilog="""The -n/--repeat and -N/--retry options are not mutually exclusive.
+        For example, "-n2 -N5" would repeat twice running the test(s) with a "tolerance"
+        of up to 4 failures each. This means each test case would run from 2 to 10 times."""
+    )
+
+    parser.add_argument("tests",
+                        help="List of test files.",
+                        nargs='*')
+
+    parser.add_argument("-f", "--fixture",
+                        dest="fixture",
+                        help="Fixture to test.",
+                        metavar="FIXTURE")
+
+    parser.add_argument("-n", "--repeat",
+                        dest="iteration_count",
+                        nargs="?",
+                        type=int,
+                        const=0,
+                        default=1,
+                        help="Repeat tests a number of times (no-flag: 1, no-value: infinite).")
+
+    parser.add_argument("-N", "--retry",
+                        dest="retry_count",
+                        type=int,
+                        default=1,
+                        help="Run tests up to a number of times (like -n, but stops on success; must be >0)")
+
+    parser.add_argument("-d", "--debug",
+                        dest="debug_mode",
+                        action="store_true",
+                        default=False,
+                        help="Debug mode.")
+
+    parser.add_argument("-o", "--output",
+                        dest="output_file",
+                        action="store",
+                        default=None,
+                        help="Output file, default STDOUT.")
+
+    parser.add_argument("-b", "--buildbot",
+                        dest="buildbot",
+                        action="store_true",
+                        default=False,
+                        help="Buildbot mode. Before running tests prepare environment, i.e., create tap0 interface.")
+
+    parser.add_argument("--dry-run",
+                        dest="dry_run",
+                        action="store_true",
+                        default=False,
+                        help="Loads the given tests and splits them into subsets (if --subsets is specified). Does not run any tests.")
+
+    parser.add_argument("-t", "--tests",
+                        dest="tests_file",
+                        action="store",
+                        default=None,
+                        help="Path to a file with a list of assemblies with tests to run. This is ignored if any test file is passed as positional argument.")
+
+    parser.add_argument("-T", "--type",
+                        dest="test_type",
+                        action="store",
+                        choices=("all", "robot", "nunit"),
+                        default="all",
+                        help="Type of test to execute (all by default).")
+
+    parser.add_argument("-r", "--results-dir",
+                        dest="results_directory",
+                        action="store",
+                        default=os.path.join(this_path, 'tests'),
+                        type=os.path.abspath,
+                        help="Location where test results should be stored.")
+
+    parser.add_argument("--run-gdb",
+                        dest="run_gdb",
+                        action="store_true",
+                        help="Run tests under GDB control.")
+
+    parser.add_argument("--include",
+                        default=None,
+                        action="append",
+                        help="Run only tests marked with a tag.")
+
+    parser.add_argument("--exclude",
+                        default=['excluded'],
+                        action="append",
+                        help="Do not run tests marked with a tag.")
+
+    parser.add_argument("--skip",
+                        default=['skipped'],
+                        action="append",
+                        help="Skip tests marked with a tag.")
+
+    parser.add_argument("--stop-on-error",
+                        dest="stop_on_error",
+                        action="store_true",
+                        default=False,
+                        help="Terminate immediately on the first test failure.")
+
+    parser.add_argument("-j", "--jobs",
+                        dest="jobs",
+                        action="store",
+                        default=1,
+                        type=int,
+                        help="Maximum number of parallel tests.")
+    parser.add_argument("--keep-temporary-files",
+                        dest="keep_temps",
+                        action="store_true",
+                        default=False,
+                        help="Don't clean temporary files on exit.")
+
+    parser.add_argument("--save-logs",
+                        choices=("onfail", "always"),
+                        default="onfail",
+                        help="When to save Renode logs. Defaults to 'onfail'. This also affects --keep-renode-output, if enabled.")
+
+    parser.add_argument("--perf-output-path",
+                        dest="perf_output_path",
+                        default=None,
+                        help="Generate perf.data from test in specified directory")
+
+    unstable_tests.add_args(parser)
+    segmenting.add_args(parser)
+
+    if platform != "win32":
+        parser.add_argument("-p", "--port",
+                            dest="port",
+                            action="store",
+                            default=None,
+                            help="Debug port.")
+
+        parser.add_argument("-s", "--suspend",
+                            dest="suspend",
+                            action="store_true",
+                            default=False,
+                            help="Suspend test waiting for a debugger.")
+
+    monitoring.add_args(parser)
+
+    return parser
+
+
+def call_or_die(to_call, error_message):
+    ret_code = subprocess.call(to_call)
+    if ret_code != 0:
+        print(error_message)
+        sys.exit(ret_code)
+
+
+def setup_tap():
+    call_or_die(['sudo', 'tunctl', '-d', 'tap0'], 'Error while removing old tap0 interface')
+    call_or_die(['sudo', 'tunctl', '-t', 'tap0', '-u', str(os.getuid())], 'Error while creating tap0 interface')
+    call_or_die(['sudo', '-n', 'ip', 'link', 'set', 'tap0', 'up'], 'Error while setting interface state')
+    call_or_die(['sudo', '-n', 'ip', 'addr', 'add', '192.0.2.1/24', 'dev', 'tap0'], 'Error while setting ip address')
+
+
+def parse_tests_file(path):
+
+    def _process(data, result):
+        if data is None:
+            return
+        for entry in data:
+            if entry is None:
+                continue
+            if isinstance(entry, list):
+                _process(entry, result)
+            else:
+                result.append(entry)
+
+    result = []
+    with open(path) as f:
+        data = yaml.load(f, Loader=IncludeLoader)
+        _process(data, result)
+    return result
+
+
+def handle_options(options):
+    if options.buildbot:
+        print("Preparing Environment")
+        setup_tap()
+    if options.debug_mode:
+        print("Running in debug mode.")
+    elif platform != "win32" and (options.port is not None or options.suspend):
+        print('Port/suspend options can be used in debug mode only.')
+        sys.exit(1)
+    if 'FIXTURE' in os.environ:
+        options.fixture = os.environ['FIXTURE']
+    if options.fixture:
+        print("Testing fixture: " + options.fixture)
+
+    if options.tests:
+        tests_collection = options.tests
+    elif options.tests_file is not None:
+        tests_collection = parse_tests_file(options.tests_file)
+    else:
+        tests_collection = []
+    options.tests = split_tests_into_groups(tests_collection, options.test_type)
+
+    options.configuration = 'Debug' if options.debug_mode else 'Release'
+
+    if options.stats_file:
+        options.stats = segmenting.parse_stats_file(options.stats_file)
+    else:
+        options.stats = {}
+
+    if options.known_unstable_file:
+        options.known_unstable = unstable_tests.parse_file(options.known_unstable_file)
+        if options.tests:
+            unstable_tests.annotate_tests(options.tests, options.known_unstable)
+    else:
+        options.known_unstable = []
+
+    if options.remote_server_full_directory is not None:
+        if not os.path.isabs(options.remote_server_full_directory):
+            options.remote_server_full_directory = os.path.join(this_path, options.remote_server_full_directory)
+    else:
+        options.remote_server_full_directory = os.path.join(options.remote_server_directory_prefix, options.configuration)
+
+    # Apply the dotnet telemetry optout in this script instead of the shell wrappers as it's
+    # portable between OSes
+    os.putenv("DOTNET_CLI_TELEMETRY_OPTOUT", "1")
+
+
+def register_handler(handler_type, extension, creator, before_parsing=None, after_parsing=None):
+    registered_handlers.append({'type': handler_type, 'extension': extension, 'creator': creator, 'before_parsing': before_parsing, 'after_parsing': after_parsing})
+
+
+def split_tests_into_groups(tests, test_type):
+
+    def _handle_entry(test_type, path, result):
+        if not os.path.exists(path):
+            print("Path {} does not exist. Quitting ...".format(path))
+            return False
+        for handler in registered_handlers:
+            if (test_type == 'all' or handler['type'] == test_type) and path.endswith(handler['extension']):
+                # Ensure consistent path separators, even on Windows
+                path = Path(path).as_posix()
+                result.append(handler['creator'](path))
+        return True
+
+    parallel_group_counter = 0
+    test_groups = {}
+
+    for entry in tests:
+        if isinstance(entry, dict):
+            group_name = list(entry.keys())[0]
+            if group_name not in test_groups:
+                test_groups[group_name] = []
+            for inner_entry in entry[group_name]:
+                if not _handle_entry(test_type, inner_entry, test_groups[group_name]):
+                    return None
+        elif isinstance(entry, str):
+            group_name = '__NONE_' + str(parallel_group_counter) + '__'
+            parallel_group_counter += 1
+            if group_name not in test_groups:
+                test_groups[group_name] = []
+            if not _handle_entry(test_type, entry, test_groups[group_name]):
+                return None
+        else:
+            print("Unexpected test type: " + entry)
+            return None
+
+    return test_groups
+
+
+def configure_output(options):
+    options.output = sys.stdout
+    if options.output_file is not None:
+        try:
+            options.output = open(options.output_file)
+        except Exception:
+            print("Failed to open output file. Falling back to STDOUT.")
+
+
+def run_test_group(args):
+
+    global shared_suite_counter
+    global shared_active_suites
+    group, total_number_of_suites, options = args
+
+    iteration_counter = 0
+    group_failed = False
+    log_files = set()
+
+    # this function will be called in a separate
+    # context (due to the pool.map_async) and
+    # needs the stdout to be reconfigured
+    configure_output(options)
+
+    while options.iteration_count == 0 or iteration_counter < options.iteration_count:
+        iteration_counter += 1
+
+        if options.iteration_count > 1:
+            print("Running tests iteration {} of {}...".format(iteration_counter, options.iteration_count))
+        elif options.iteration_count == 0:
+            print("Running tests iteration {}...".format(iteration_counter))
+
+        for suite in group:
+            retry_suites_counter = 0
+            should_retry_suite = True
+            suite_failed = False
+
+            if shared_active_suites is None:
+                print("warning: `shared_active_suites` must be set for suite tracking to work")
+                shared_active_suites = []
+            shared_active_suites.append(suite.path)
+
+            try:
+                while should_retry_suite and retry_suites_counter < options.retry_count:
+                    retry_suites_counter += 1
+
+                    if retry_suites_counter > 1:
+                        print("Retrying suite, attempt {} of {}...".format(retry_suites_counter, options.retry_count))
+
+                    # we need to collect log files here instead of appending to a global list
+                    # in each suite runner because this function will be called in a multiprocessing
+                    # context when using the --jobs argument, as mentioned above
+                    ok, suite_log_files = suite.run(options,
+                                                    iteration_index=iteration_counter,
+                                                    suite_retry_index=retry_suites_counter - 1)
+                    log_files.update((type(suite), log_file) for log_file in suite_log_files)
+                    if ok:
+                        suite_failed = False
+                        should_retry_suite = False
+                    else:
+                        suite_failed = True
+                        should_retry_suite = suite.should_retry_suite(options, iteration_counter, retry_suites_counter - 1)
+                        if options.retry_count > 1 and not should_retry_suite:
+                            print("No Robot<->Renode connection issues were detected to warrant a suite retry - giving up.")
+            except Exception as e:
+                print(f"Exception occurred when running {suite.path}:")
+                import traceback
+                traceback.print_exception(e)
+                raise
+            finally:
+                shared_active_suites.remove(suite.path)
+
+            if shared_suite_counter is None:
+                print("warning: `shared_suite_counter` must be set for suite counting to work")
+                current_counter_value = -1 
+            elif isinstance(shared_suite_counter, int):
+                shared_suite_counter += 1
+                current_counter_value = shared_suite_counter 
+            else:
+                with shared_suite_counter.get_lock():
+                    shared_suite_counter.value += 1
+                    current_counter_value = shared_suite_counter.value
+
+            print(f"+++++ Finished suite \033[95m{current_counter_value}/{total_number_of_suites}\033[0m")
+
+            if suite_failed:
+                group_failed = True
+        if options.stop_on_error and group_failed:
+            break
+
+    options.output.flush()
+    return (group_failed, log_files)
+
+def print_failed_tests(options):
+    for handler in registered_handlers:
+        handler_obj = handler['creator']
+        failed = handler_obj.find_failed_tests(options.results_directory)
+
+        if failed is not None:
+            def _print_helper(what):
+                for i, fail in enumerate(failed[what]):
+                    print("\t{0}. {1}".format(i + 1, fail))
+
+            if CRITICAL_TEST in failed and failed[CRITICAL_TEST]:
+                print("Failed {} critical tests:".format(handler['type']))
+                _print_helper(CRITICAL_TEST)
+
+            if TestTag.UNSTABLE in failed and failed[TestTag.UNSTABLE]:
+                print("Failed {} unstable tests:".format(handler['type']))
+                _print_helper(TestTag.UNSTABLE)
+
+            if TestTag.NON_CRITICAL in failed and failed[TestTag.NON_CRITICAL]:
+                print("Failed {} non-critical tests:".format(handler['type']))
+                _print_helper(TestTag.NON_CRITICAL)
+            print("------")
+
+def print_rerun_trace(options):
+    for handler in registered_handlers:
+        handler_obj = handler["creator"]
+        reruns = handler_obj.find_rerun_tests(options.results_directory)
+        if not reruns:
+            continue
+
+        did_retry = False
+        if options.retry_count != 1:
+            for trace in reruns.values():
+                test_case_retry_occurred = any([x["nth"] > 1 for x in trace])
+                suite_retry_occurred = any([x["label"].endswith("retry1") for x in trace])
+                if test_case_retry_occurred or suite_retry_occurred:
+                    did_retry = True
+                    break
+        if options.iteration_count == 1 and not did_retry:
+            return
+        elif options.iteration_count == 1 and did_retry:
+            print("Some tests were retried:")
+        elif options.iteration_count != 1 and not did_retry:
+            print(f"Ran {options.iteration_count} iterations:")
+        elif options.iteration_count != 1 and did_retry:
+            print(f"Ran {options.iteration_count} iterations, some tests were retried:")
+
+        trace_index = 0
+        for test, trace in reruns.items():
+            n_runs = sum([x["nth"] for x in trace])
+            has_failed = not all(x["nth"] == 1 and x["status"] == "PASS" for x in trace)
+            if n_runs == 1 or not has_failed:
+                # Don't mention tests that were run only once or that never
+                # failed. It CAN happen that n_runs > 1 and has_failed == False;
+                # when another test in the same suite triggers a suite retry.
+                continue
+            trace_index += 1
+            print(f"\t{trace_index}. {test} was started {n_runs} times:")
+            iteration_index = 1
+            suite_retry_index = 0
+            for i, trace_entry in enumerate(trace, 1):
+                label, status, nth, tags, crash = trace_entry.values()
+                print("\t     {}:  {} {:<9} {}{}{}".format(
+                    label, nth,
+                    "attempt," if nth == 1 else "attempts,",
+                    status,
+                    f" [{', '.join(tags)}]" if tags else "",
+                    " (crash detected)" if crash else "",
+                ))
+                if label == "iteration":
+                    iteration_index += 1
+                else:
+                    suite_retry_index += 1
+        print("------")
+
+# analyzes logs before they are cleaned up to determine
+# if any test failures were caused by a Renode crash.
+#
+# returns:
+# - TRUE only when a test failed on its final run AND
+#   that last failure was caused by a crash
+# - FALSE if the test passed or when one of the runs crashed
+#   but the final retry failed for other reasons such as wrong result
+#
+# when running multiple test suites returns TRUE if ANY failed due to a crash.
+def failed_due_to_crash(options, groups_segment) -> bool:
+    for (group, _) in groups_segment:
+        for suite in options.tests[group]:
+            if suite.tests_failed_due_to_renode_crash():
+                return True
+
+    return False
+
+
+def verify_suite_files_unique(groups: dict[str, Any]):
+    suite_file_paths = [
+        Path(suite.path) for suites in groups.values() for suite in suites
+    ]
+
+    paths_by_filename = defaultdict(list)
+    for path in suite_file_paths:
+        paths_by_filename[path.name].append(path)
+
+    duplicates = {
+        filename: paths
+        for filename, paths in paths_by_filename.items()
+        if len(paths) > 1
+    }
+
+    if duplicates:
+        print("ERROR: Duplicate suite file names are not allowed. Found duplicates:")
+        for filename, paths in duplicates.items():
+            print(f"  {filename}:")
+            for path in paths:
+                print(f"    - {path}")
+        sys.exit(1)
+
+
+def print_suite_files(segment: segmenting.GroupsSegment):
+    segment_num = segment.subset.segment
+    max_segments = segment.subset.max_segments 
+    segment_test_file_paths = segment.test_file_paths
+    groups_segment  = segment.groups
+
+    test_file_path_count = len(segment_test_file_paths)
+    suites_list_header = (
+        (
+            f"Will run segment {segment_num}/{max_segments}, "
+            f"consisting of the following {test_file_path_count} test files:"
+        )
+        if max_segments > 1
+        else f"Will run the following {test_file_path_count} test files:"
+    )
+    print(suites_list_header)
+
+    for group, suites in groups_segment:
+        is_group = not group.startswith("__NONE_")
+        padding = ""
+        if is_group:
+            print(f"  - {group}:")
+            padding = "  "
+        for suite in suites:
+            print(f"  {padding}- {suite.path}")
+
+    print("")
+
+
+def on_overload_detected():
+    if not shared_active_suites:
+        return
+
+    active_suite_count = len(shared_active_suites)
+    verb = "are" if active_suite_count > 1 else "is"
+    plural_s = "s" if active_suite_count > 1 else ""
+    print(
+        f"There {verb} {active_suite_count} currently running test suite{plural_s}:",
+        flush=True,
+    )
+    for suite in shared_active_suites:
+        print(f"  - {suite}", flush=True)
+    print("", flush=True)
+
+
+def init_worker_process(counter, active_suites):
+    global shared_suite_counter
+    shared_suite_counter = counter 
+    global shared_active_suites
+    shared_active_suites = active_suites
+
+
+def run():
+    parser = prepare_parser()
+    for handler in registered_handlers:
+        if 'before_parsing' in handler and handler['before_parsing'] is not None:
+            handler['before_parsing'](parser)
+
+    options = parser.parse_args()
+    handle_options(options)
+
+    if not options.tests:
+        sys.exit(1)
+
+    for handler in registered_handlers:
+        if 'after_parsing' in handler and handler['after_parsing'] is not None:
+            handler['after_parsing'](options)
+
+    configure_output(options)
+
+    verify_suite_files_unique(options.tests)
+
+    print("Preparing suites")
+
+    segment = segmenting.segment_groups(options)
+    segment_num = segment.subset.segment
+    max_segments = segment.subset.max_segments 
+    segment_test_file_paths = segment.test_file_paths
+    groups_segment  = segment.groups
+    total_number_of_suites = len(segment_test_file_paths) * options.iteration_count
+
+    print_suite_files(segment)
+
+    if options.dry_run:
+        print("Exiting early due to --dry-run")
+        exit(0)
+
+    args = []
+    for (_, group_suites) in groups_segment:
+        args.append((group_suites, total_number_of_suites, options))
+
+    for (group, _) in groups_segment:
+        for suite in options.tests[group]:
+            res = suite.prepare(options)
+            if res is not None and res != 0:
+                print("Build failure, not running tests.")
+                sys.exit(res)
+
+    print("Starting suites")
+
+    # python3 cannot handle passing
+    # 'output' field via 'pool.map_async';
+    # the value is restored later
+    options.output = None
+
+    # Prepare job inputs
+    if options.jobs == 1:
+        global shared_suite_counter
+        shared_suite_counter = 0
+        global shared_active_suites
+        shared_active_suites = []
+        pool = None
+    else:
+        multiprocessing.set_start_method("spawn")
+        # To share a counter between all the worker processes, we must create a 
+        # multiprocessing.Value that gets passed to each worker process through
+        # its initializer function (by assigning a global variable).
+        shared_suite_counter_object = multiprocessing.Value('i', 0)
+        # Like the counter, we need to use a multiprocessing.Manager to create
+        # a shared list that keeps track of the currently running suites.
+        shared_active_suites = multiprocessing.Manager().list()
+        pool = multiprocessing.Pool(
+            initializer=init_worker_process, 
+            initargs=(shared_suite_counter_object, shared_active_suites), 
+            processes=options.jobs,
+        )
+
+    # Start monitoring
+    if options.enable_system_load_monitoring:
+        system_monitor = monitoring.SystemLoadMonitor(
+            options.system_load_sample_interval_seconds,
+            options.system_load_spike_factor,
+            options.system_load_window_size,
+            options.ram_warn_threshold_percentage,
+            options.cpu_warn_threshold_percentage,
+            on_overload_detected,
+        )
+        system_monitor.start()
+    else:
+        system_monitor = None
+
+    # Run test job(s)
+    if options.jobs == 1:
+        tests_failed, logs = zip(*map(run_test_group, args))
+    else:
+        assert pool, "Pool must have been instantiated at this point"
+        # this get is a hack - see: https://stackoverflow.com/a/1408476/980025
+        # we use `async` + `get` in order to allow "Ctrl+C" to be handled correctly;
+        # otherwise it would not be possible to abort tests in progress
+        tests_failed, logs = zip(*pool.map_async(run_test_group, args, chunksize=1).get(999999))
+        pool.close()
+        print("Waiting for all processes to exit")
+        pool.join()
+
+    if system_monitor:
+        system_monitor.stop()
+
+    tests_failed = any(tests_failed)
+    logs = set().union(*logs)
+    logs_per_type = defaultdict(lambda: [])
+    for suite_type, log in logs:
+        logs_per_type[suite_type].append(log)
+
+    configure_output(options)
+
+    print("Cleaning up suites")
+
+    # check if renode crash caused a failed test based on logs for tested suites
+    # before the log files are cleaned up
+    test_failed_due_to_crash: bool = tests_failed and failed_due_to_crash(options, groups_segment)
+
+    for (group, _) in groups_segment:
+        for suite in options.tests[group]:
+            type(suite).log_files = logs_per_type[type(suite)]
+            suite.cleanup(options)
+
+    options.output.flush()
+    if options.output is not sys.stdout:
+        options.output.close()
+
+    if max_segments > 1:
+        print( f"Ran segment {segment_num}/{max_segments}, consisting of {total_number_of_suites} test files.")
+    if tests_failed:
+        print("Some tests failed :( See the list of failed tests below and logs for details!")
+
+    print_failed_tests(options)
+
+    if tests_failed:
+        print_rerun_trace(options)
+        if test_failed_due_to_crash:
+            print('Renode crashed during testing and caused a failure', file=sys.stderr)
+            sys.exit(2)
+        sys.exit(1)
+    print("Tests finished successfully :)")
+    print_rerun_trace(options)

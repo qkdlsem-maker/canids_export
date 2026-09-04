@@ -7,6 +7,24 @@ vcan0을 실시간으로 리스닝하며, 메시지가 들어올 때마다 즉�
 import can, time, pickle, os, sys, csv
 import numpy as np
 import lightgbm as lgb
+import psutil, threading
+
+_proc = psutil.Process()
+_peak_rss = 0
+_cpu_samples = []
+_stop_monitor = threading.Event()
+
+def _resource_monitor():
+    global _peak_rss
+    _proc.cpu_percent(interval=None)  # 첫 호출은 기준점이라 버림
+    while not _stop_monitor.is_set():
+        rss = _proc.memory_info().rss
+        if rss > _peak_rss:
+            _peak_rss = rss
+        _cpu_samples.append(_proc.cpu_percent(interval=None))
+        time.sleep(0.5)
+
+threading.Thread(target=_resource_monitor, daemon=True).start()
 
 HERE = os.path.dirname(__file__)
 DURATION = int(sys.argv[1]) if len(sys.argv) > 1 else 90
@@ -112,5 +130,17 @@ except KeyboardInterrupt:
     pass
 finally:
     pred_file.close()
+    _stop_monitor.set()
+    time.sleep(0.6)
+    peak_mb = _peak_rss / (1024 * 1024)
+    avg_cpu = sum(_cpu_samples) / len(_cpu_samples) if _cpu_samples else 0
+    max_cpu = max(_cpu_samples) if _cpu_samples else 0
+
     print(f"[realtime_ids] 종료. 총 {n_msg:,}건 처리, 알림 {n_alert:,}건")
+    print(f"[realtime_ids] Peak RSS: {peak_mb:.2f} MB, 평균 CPU: {avg_cpu:.1f}%, 최대 CPU: {max_cpu:.1f}%")
     print(f"[realtime_ids] 저장: {pred_path}")
+
+    res_path = os.path.join(HERE, "..", "results", "realtime_resource_usage.txt")
+    with open(res_path, "w", encoding="utf-8") as rf:
+        rf.write(f"peak_rss_mb={peak_mb:.2f}\navg_cpu_percent={avg_cpu:.1f}\nmax_cpu_percent={max_cpu:.1f}\n")
+        rf.write(f"total_messages={n_msg}\ntotal_alerts={n_alert}\n")

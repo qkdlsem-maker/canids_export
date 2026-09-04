@@ -1,0 +1,4 @@
+using "platforms/cpus/stm32h7.repl"
+
+nvic:
+    systickFrequency: 480_000_000
