@@ -32,3 +32,8 @@ __pycache__/
 .vscode/
 .idea/
 .DS_Store
+data_full/
+road_data/
+models_c/renode_portable/
+ICSim/
+*.log

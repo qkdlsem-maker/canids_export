@@ -1,0 +1,127 @@
+"""
+ICSim 환경 실시간 탐지. LightGBM(1단계)은 HCRL 차량 전용이라 사용 안 함
+(새 차량엔 라벨링된 공격 데이터가 없어 1단계 재학습이 애초에 불가능 - 정직한 설계 선택).
+
+사용법: python3 23_icsim_realtime_detect.py [지속시간(초), 기본 90]
+"""
+import can, time, pickle, os, sys, csv
+import numpy as np
+import psutil, threading
+
+HERE = os.path.dirname(__file__)
+DURATION = int(sys.argv[1]) if len(sys.argv) > 1 else 90
+CHANNEL = "vcan0"
+
+with open(os.path.join(HERE, "..", "models", "icsim_stats.pkl"), "rb") as f:
+    STATS = pickle.load(f)
+known_ids = STATS["known_ids"]
+id_delta_stats = STATS["id_delta_stats"]
+id_byte_stats = STATS["id_byte_stats"]
+g_delta_mean, g_delta_std = STATS["global_delta_mean"], STATS["global_delta_std"]
+WINDOW = STATS["window"]
+
+npz = np.load(os.path.join(HERE, "..", "models", "maha_detector_icsim.npz"))
+MEAN_, INV_COV, THR = npz["mean"], npz["inv_cov"], float(npz["thr"])
+
+def payload_entropy(pl):
+    v, c = np.unique(pl, return_counts=True)
+    p = c / c.sum()
+    return -np.sum(p * np.log2(p + 1e-12))
+
+_proc = psutil.Process()
+_peak_rss = 0
+_cpu_samples = []
+_stop_monitor = threading.Event()
+
+def _resource_monitor():
+    global _peak_rss
+    _proc.cpu_percent(interval=None)
+    while not _stop_monitor.is_set():
+        rss = _proc.memory_info().rss
+        if rss > _peak_rss:
+            _peak_rss = rss
+        _cpu_samples.append(_proc.cpu_percent(interval=None))
+        time.sleep(0.5)
+
+threading.Thread(target=_resource_monitor, daemon=True).start()
+
+id_window = []
+last_payload_per_id = {}
+
+pred_path = os.path.join(HERE, "..", "results", "realtime_predictions.csv")
+os.makedirs(os.path.dirname(pred_path), exist_ok=True)
+pred_file = open(pred_path, "w", newline="")
+writer = csv.writer(pred_file)
+writer.writerow(["timestamp", "can_id", "final_label", "latency_ms", "dist", "freq_in_window", "unique_ids_in_window", "is_unknown_id", "entropy", "mean_byte", "delta_zscore", "value_zscore", "norm_id"])
+
+bus = can.interface.Bus(channel=CHANNEL, bustype="socketcan")
+print(f"[icsim_detect] {CHANNEL} 리스닝 시작(ICSim 캘리브레이션 기반), {DURATION}초간 실행")
+
+t_end = time.time() + DURATION
+n_msg, n_alert = 0, 0
+try:
+    while time.time() < t_end:
+        msg = bus.recv(timeout=1.0)
+        if msg is None:
+            continue
+        t0 = time.time()
+        cid = msg.arbitration_id
+        pl = np.array(list(msg.data) + [0] * 8)[:8].astype(float)
+
+        id_window.append(cid)
+        if len(id_window) > WINDOW:
+            id_window.pop(0)
+
+        freq_in_window = id_window.count(cid) / len(id_window)
+        unique_ids_in_window = len(set(id_window))
+        is_unknown_id = 0.0 if cid in known_ids else 1.0
+        entropy = payload_entropy(pl)
+        mean_byte = pl.mean()
+
+        if cid in last_payload_per_id:
+            delta = np.abs(pl - last_payload_per_id[cid]).sum()
+        else:
+            delta = 0.0
+        last_payload_per_id[cid] = pl
+        mu, sigma = id_delta_stats.get(cid, (g_delta_mean, g_delta_std))
+        delta_zscore = (delta - mu) / sigma
+
+        if cid in id_byte_stats:
+            bmu, bstd = id_byte_stats[cid]
+            value_zscore = np.max(np.abs((pl - bmu) / bstd))
+        else:
+            value_zscore = 0.0
+
+        norm_id = cid / 2048.0
+        x = np.array([freq_in_window, unique_ids_in_window, is_unknown_id, entropy,
+                       mean_byte, delta_zscore, value_zscore, norm_id])
+
+        diff = x - MEAN_
+        dist = np.sqrt(diff @ INV_COV @ diff)
+        final_label = "anomaly" if dist > THR else "normal"
+
+        latency_ms = (time.time() - t0) * 1000
+        n_msg += 1
+        if final_label != "normal":
+            n_alert += 1
+            print(f"[ALERT] t={time.time():.3f} id={hex(cid)} -> {final_label} (dist={dist:.1f}, {latency_ms:.3f}ms)")
+
+        writer.writerow([time.time(), cid, final_label, f"{latency_ms:.4f}", f"{dist:.4f}", f"{freq_in_window:.4f}", unique_ids_in_window, is_unknown_id, f"{entropy:.4f}", f"{mean_byte:.2f}", f"{delta_zscore:.3f}", f"{value_zscore:.3f}", f"{norm_id:.4f}"])
+except KeyboardInterrupt:
+    pass
+finally:
+    pred_file.close()
+    _stop_monitor.set()
+    time.sleep(0.6)
+    peak_mb = _peak_rss / (1024 * 1024)
+    avg_cpu = sum(_cpu_samples) / len(_cpu_samples) if _cpu_samples else 0
+    max_cpu = max(_cpu_samples) if _cpu_samples else 0
+
+    print(f"[icsim_detect] 종료. 총 {n_msg:,}건 처리, 알림 {n_alert:,}건")
+    print(f"[icsim_detect] Peak RSS: {peak_mb:.2f} MB, 평균 CPU: {avg_cpu:.1f}%, 최대 CPU: {max_cpu:.1f}%")
+    print(f"[icsim_detect] 저장: {pred_path}")
+
+    res_path = os.path.join(HERE, "..", "results", "realtime_resource_usage.txt")
+    with open(res_path, "w", encoding="utf-8") as rf:
+        rf.write(f"peak_rss_mb={peak_mb:.2f}\navg_cpu_percent={avg_cpu:.1f}\nmax_cpu_percent={max_cpu:.1f}\n")
+        rf.write(f"total_messages={n_msg}\ntotal_alerts={n_alert}\n")
