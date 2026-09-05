@@ -1,0 +1,10 @@
+mach create "stm32f4"
+machine LoadPlatformDescription @renode_portable/platforms/boards/stm32f4_discovery-kit.repl
+sysbus LoadELF @can_fw/can_test_fw.elf
+
+emulation CreateCANHub "canHub"
+connector Connect can1 canHub
+machine CreateSocketCANBridge "socketcan" "vcan1"
+connector Connect socketcan canHub
+
+start
