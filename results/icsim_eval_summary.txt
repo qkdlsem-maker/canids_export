@@ -1,0 +1,8 @@
+=== ICSim 실시간 검증 결과 (ICSim 자체 캘리브레이션 기준) ===
+
+[DoS] any-alert=33.8% 평균탐지지연=6.4ms
+[spoof1] any-alert=5.4% 평균탐지지연=0.9ms
+[spoof2] any-alert=6.7% 평균탐지지연=3.0ms
+[Fuzzy] any-alert=14.3% 평균탐지지연=0.7ms
+
+정상 구간 오탐율(FPR): 0.056%

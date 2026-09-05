@@ -1,0 +1,5 @@
+attack,lgbm_detect,lgbm_type_acc,maha_detect,hybrid_detect,hybrid_type_acc
+DoS,1.0,1.0,1.0,1.0,1.0
+Fuzzy,1.0,1.0,0.9991248877323078,1.0,1.0
+gear,1.0,1.0,1.0,1.0,1.0
+RPM,1.0,1.0,1.0,1.0,1.0

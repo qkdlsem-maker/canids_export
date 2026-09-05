@@ -1,0 +1,5 @@
+peak_rss_mb=65.76
+avg_cpu_percent=52.2
+max_cpu_percent=74.0
+total_messages=122274
+total_alerts=5169

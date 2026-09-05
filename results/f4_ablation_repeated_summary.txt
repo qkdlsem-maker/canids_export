@@ -1,0 +1,17 @@
+=== F4 Ablation: 시드 3회 반복 (LightGBM 부분) ===
+
+known_DoS: 1.0000 ± 0.0000
+known_Fuzzy: 1.0000 ± 0.0000
+known_gear: 1.0000 ± 0.0000
+known_RPM: 1.0000 ± 0.0000
+zeroday_lgbm_DoS: 1.0000 ± 0.0000
+zeroday_lgbm_Fuzzy: 0.9991 ± 0.0000
+zeroday_lgbm_gear: 0.3721 ± 0.5469
+zeroday_lgbm_RPM: 0.0001 ± 0.0002
+lgbm_latency_ms: 0.1137 ± 0.0010
+
+Mahalanobis(결정론적, 시드무관): threshold=10.690
+  known_DoS(Mahalanobis 단독)=1.0000
+  known_Fuzzy(Mahalanobis 단독)=0.9991
+  known_gear(Mahalanobis 단독)=1.0000
+  known_RPM(Mahalanobis 단독)=1.0000

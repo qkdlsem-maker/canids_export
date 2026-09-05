@@ -1,0 +1,6 @@
+lgbm_f1=1.0000
+lgbm_size_kb=709.1
+maha_size_kb=1.27
+total_mb=0.694
+e2e_latency_ms=0.328
+fpr=0.0199

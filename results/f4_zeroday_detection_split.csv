@@ -1,0 +1,5 @@
+held_out,lgbm_detect,maha_detect,hybrid_detect
+DoS,1.0,1.0,1.0
+Fuzzy,0.9991018584621053,0.9991248877323078,0.9991248877323078
+gear,1.0,1.0,1.0
+RPM,0.0,1.0,1.0

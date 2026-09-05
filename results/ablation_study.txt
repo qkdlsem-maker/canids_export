@@ -1,0 +1,17 @@
+=== Ablation Study: LightGBM 단독 vs Mahalanobis 단독 vs Hybrid ===
+
+(1) 알려진 공격 탐지율(Recall)
+  [DoS] LightGBM=100.0% Mahalanobis=100.0% Hybrid=100.0% (n=21,164)
+  [Fuzzy] LightGBM=100.0% Mahalanobis=99.9% Hybrid=100.0% (n=43,423)
+  [gear] LightGBM=100.0% Mahalanobis=100.0% Hybrid=100.0% (n=69,037)
+  [RPM] LightGBM=100.0% Mahalanobis=100.0% Hybrid=100.0% (n=82,652)
+
+(2) 미학습 변형공격(Zero-day) 탐지율
+  [held-out=DoS] LightGBM=100.0% Mahalanobis=100.0% Hybrid=100.0% (n=21,164)
+  [held-out=Fuzzy] LightGBM=99.0% Mahalanobis=99.9% Hybrid=99.9% (n=43,423)
+  [held-out=gear] LightGBM=10.0% Mahalanobis=100.0% Hybrid=100.0% (n=69,037)
+  [held-out=RPM] LightGBM=0.0% Mahalanobis=100.0% Hybrid=100.0% (n=82,652)
+
+(3) 공격유형 세부 라벨링: LightGBM=가능, Mahalanobis=불가능, Hybrid=부분 가능
+
+(4) 추론 지연시간: LightGBM=0.106ms, Mahalanobis=0.086ms, Hybrid=0.234ms
