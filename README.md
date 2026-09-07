@@ -25,8 +25,9 @@ CAN 버스는 발신자 인증·암호화가 없어 DoS/Fuzzing/Spoofing 공격�
 |---|---|---|---|
 | F1 | ICSim·can-utils 실시간 주입, 탐지율/오탐률/지연 정량화, Peak RAM/CPU | 기존 실시간 검증에 더해 **탐지기와 독립된 per-frame GT 체인**으로 재검증. GT→candump 9,485/9,485(100%), 처리 프레임 attack recall 100%, end-to-end recall 99.9789%, 별도 normal-only FPR 0.053538% | ✅ 완료 |
 | F2 | 5%서브셋→전체 데이터 재현성 검증 | HCRL 전체(1,657만 행) 재학습, 시드 3회 반복(F1=1.0000±0, FPR=0.0192%±0) | ✅ 완료 |
-| F3 | CAN ID 의존 낮은 feature set 재설계 | ID-agnostic 6피처 설계, V1/V2 모두 전체데이터 기준 ROAD 공정비교(V1 FPR 100%실패 vs V2 FPR 0.07%) | ✅ 완료 |
-| F4 | LightGBM단독 vs Mahalanobis단독 vs Hybrid 비교 | 4축 비교 + 시드 3회 반복 + 탐지/유형정확 지표 분리(zero-day RPM: LGBM 0% vs Hybrid 100%) | ✅ 완료 |
+| F3 | CAN ID 의존 낮은 feature set 재설계 | ID-agnostic 6피처 설계, V1/V2 모두 전체데이터 기준 ROAD 공정비교(V1 FPR 100%실패 vs V2 FPR 0.08% (정확값 0.079932%)) | ✅ 완료 |
+| HCRL 내부 zero-day 탐지(Hybrid) | 기존 동일-domain/held-out 평가에서 99.9~100% 수준 |
+| ROAD 외부 일반화 — V2 frozen threshold | TPR 12.398709%, FPR 0.079932%, Balanced Accuracy 56.159388% |
 | F5 | 실제 MCU Flash/RAM/CPU/WCET/탐지지연 | ARM Cortex-M4 크로스컴파일 + Renode 에뮬레이션. Renode 공식 `ElapsedCycles`(진짜 사이클 카운터)로 실측: Flash 254KB, 정적RAM 1.7KB, 최악(Fuzzy) WCET 908,880cycles=5.41ms(168MHz) | 🟢 완료(시뮬레이션 기준) |
 | F6 | 기존 ECU 기능과 동시 동작(장시간·최대부하) | SysTick 동시성 + Renode bxCAN FIFO 대조실험에 더해 host SocketCAN/vcan 부하·장시간 검증. **약 17.2k observed fps에서 3/3회 100% processing coverage**, 약 20k fps에서 59분 steady-state 운용 시 throughput·latency·CPU·RSS의 유의한 열화 없음. 실제 MCU CAN FIFO/장시간 silicon 검증은 별도 필요 | 🟢 Host/시뮬레이션 검증 완료 |
 | F7 | (선행 결함) C 변환기 정상 클래스 인덱스 오류 | NORMAL_IDX/CODE_MAP 도입, x86+ARM 회귀테스트로 검증 | ✅ 완료 |
@@ -37,7 +38,7 @@ CAN 버스는 발신자 인증·암호화가 없어 DoS/Fuzzing/Spoofing 공격�
 
 ## 3. 최종 시스템 아키텍처
 CAN 버스 실시간 스트림
--> 특징공학 (8개 피처: 빈도/엔트로피/ID별 z-score 등)
+- **Mahalanobis V2 최종 입력 피처 (6개, ID-agnostic)**: `freq_in_window`, `unique_ids_in_window`, `entropy`, `mean_byte`, `global_delta_zscore`, `global_value_zscore`
 -> 1단계 LightGBM (시그니처 기반, 알려진 공격 즉시 분류)
 -> 알려진 공격이면: 유형(DoS/Fuzzy/gear/RPM)과 함께 즉시 경보
 -> 정상으로 분류되면: 2단계로
@@ -50,7 +51,8 @@ CAN 버스 실시간 스트림
 | 지표 | 결과 |
 |---|---|
 | Macro F1 (알려진 공격) | 1.0000 ± 0.0000 (시드 3회) |
-| Zero-day 탐지율(Hybrid) | 99.9~100% (LightGBM 단독은 0~100%로 불안정) |
+| HCRL 내부 zero-day 탐지(Hybrid) | 기존 동일-domain/held-out 평가에서 99.9~100% 수준 |
+| ROAD 외부 일반화 — V2 frozen threshold | TPR 12.398709%, FPR 0.079932%, Balanced Accuracy 56.159388% |
 | 하이브리드 e2e 지연 | 0.11~0.31ms (PC 기준) |
 | MCU Flash / 정적 RAM | 254KB / 1.7KB |
 | MCU WCET(5클래스, 168MHz, Renode ElapsedCycles 실측) | 2.18~5.41ms (최악: Fuzzy) |
