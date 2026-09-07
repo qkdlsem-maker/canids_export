@@ -1,0 +1,42 @@
+=== Long-Duration Host/vcan Stability ===
+
+Protocol
+--------
+Duration requested     : 3660.0 s
+Reporting interval     : 60.0 s
+Environment            : Linux SocketCAN / vcan0
+Detector               : ICSim Mahalanobis real-time path
+Per-frame disk logging : NO
+Physical MCU FIFO test : NO
+
+Results
+-------
+Elapsed time           : 3660.172 s
+Total processed frames : 71,928,346
+Overall processing FPS : 19651.630
+
+FPS mean               : 19652.114
+FPS minimum            : 9934.473
+FPS maximum            : 19992.933
+
+p99 latency mean       : 0.045583 ms
+p99 latency maximum    : 0.056169 ms
+
+CPU mean               : 53.482 %
+RSS first              : 70.488 MB
+RSS last               : 75.227 MB
+RSS peak               : 75.227 MB
+RSS growth             : 4.738 MB
+
+First-5 interval FPS   : 17990.479
+Last-5 interval FPS    : 17973.825
+Throughput change      : -0.092572 %
+
+RSS slope / interval   : 0.008507 MB
+FPS slope / interval   : -0.139013
+
+Interpretation
+--------------
+This is a host-side long-duration stability preflight.
+It evaluates throughput, latency and process-resource drift.
+It does NOT establish physical MCU CAN peripheral/FIFO long-duration stability.

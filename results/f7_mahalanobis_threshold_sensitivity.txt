@@ -1,0 +1,38 @@
+=== Mahalanobis V2 Threshold Sensitivity ===
+
+[Protocol]
+Mean/covariance: frozen HCRL V2 train-normal model
+Threshold candidates: HCRL train-normal distance percentiles only
+ROAD used for threshold calculation: NO
+ROAD used for threshold selection/tuning: NO
+Frozen final operating point: 99.90 percentile
+
+[Frozen threshold audit]
+Saved threshold       : 10.1040212650
+Recomputed 99.90%     : 10.1040209354
+Absolute difference   : 3.29681745015e-07
+
+Pct, Threshold, HCRL_FPR, HCRL_attack_TPR, ROAD_FPR, ROAD_TPR, ROAD_BA
+99.00, 6.876150, 0.276050%, 76.612382%, 1.060749%, 20.280361%, 59.609806%
+99.50, 8.198411, 0.142978%, 57.491468%, 0.375003%, 19.281762%, 59.453379%
+99.70, 8.899195, 0.087958%, 46.444491%, 0.226788%, 17.634661%, 58.703936%
+99.80, 9.153870, 0.057671%, 45.156786%, 0.189936%, 16.442160%, 58.126112%
+99.90, 10.104021, 0.028183%, 32.951678%, 0.079932%, 12.398709%, 56.159388% [FINAL]
+99.95, 11.164184, 0.012598%, 21.712455%, 0.048472%, 5.960758%, 52.956143%
+99.99, 14.232271, 0.002166%, 5.239631%, 0.000238%, 1.334591%, 50.667177%
+
+[Frozen 99.90% operating point]
+HCRL normal FPR : 0.028183%
+HCRL attack TPR : 32.951678%
+ROAD normal FPR : 0.079932%
+ROAD attack TPR : 12.398709%
+ROAD TNR        : 99.920068%
+ROAD BA         : 56.159388%
+
+[Local sensitivity: percentiles 99.70 / 99.80 / 99.90 / 99.95]
+ROAD FPR range (max-min): 0.178316%
+ROAD TPR range (max-min): 11.673903%
+ROAD BA range  (max-min): 5.747794%
+
+[Interpretation rule]
+This sweep is a post-hoc sensitivity analysis only. The frozen 99.90% threshold is NOT re-selected using ROAD.

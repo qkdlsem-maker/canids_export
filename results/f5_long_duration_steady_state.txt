@@ -1,0 +1,43 @@
+=== F5 Steady-State Long-Duration Analysis ===
+
+Evaluation interval
+-------------------
+Intervals              : 2 - 60
+Steady-state duration  : approximately 59 minutes
+
+Throughput
+----------
+FPS mean               : 19980.069
+FPS std                : 6.346
+FPS minimum            : 19965.066
+FPS maximum            : 19992.933
+First-5 FPS mean       : 19983.200
+Last-5 FPS mean        : 19983.790
+First→last change      : 0.002953 %
+FPS slope / minute     : -0.003015
+
+Latency
+-------
+p99 mean               : 0.045725 ms
+p99 maximum            : 0.056169 ms
+First-5 p99 mean       : 0.043267 ms
+Last-5 p99 mean        : 0.042179 ms
+First→last p99 change  : -0.001088 ms
+p99 slope / minute     : 0.000043627 ms
+
+Resources
+---------
+CPU mean               : 54.375 %
+CPU maximum            : 56.500 %
+
+RSS first              : 75.051 MB
+RSS last               : 75.121 MB
+RSS minimum            : 75.051 MB
+RSS maximum            : 75.121 MB
+RSS growth             : 0.070312 MB
+RSS slope / minute     : 0.001094024 MB
+
+Protocol note
+-------------
+Host-side Linux SocketCAN/vcan stability preflight.
+Physical MCU long-duration/FIFO stability was NOT evaluated.
