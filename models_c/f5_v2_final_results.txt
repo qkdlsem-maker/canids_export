@@ -1,0 +1,185 @@
+F5 — Frozen V2 MCU Deployment / Renode Evidence
+================================================
+
+MODEL
+-----
+Model: Frozen V2 Hybrid CAN IDS
+Features: 6 ID-agnostic features
+LightGBM: 5 classes, 400 trees
+Mahalanobis threshold: 10.104021265036314
+
+Generated C SHA256:
+9bd26883dd20f81d40e04ba69e63ea7f75fed4fe0d63f2965b381e81ebcebb44
+
+Python <-> C validation:
+10,000 deterministic class-balanced V2 test samples
+LightGBM argmax match: 100%
+Mahalanobis anomaly-flag match: 100%
+Hybrid final-decision match: 100%
+
+
+CANONICAL BUILD
+---------------
+Compiler:
+arm-none-eabi-gcc 13.2.1 (20231009)
+
+Flags:
+-mcpu=cortex-m4 -mthumb -O2
+-ffunction-sections -fdata-sections
+-ffreestanding -nostartfiles
+-T linker.ld
+-Wl,--gc-sections
+-lgcc -lm
+
+Canonical benchmark ELF SHA256:
+53c7fbf59e9002fd6db2def2504d550cb840dee54b3777afe441e9530b997570
+
+
+MEMORY
+------
+.text: 253296 B
+.data: 304 B
+.bss: 332 B
+
+Flash image convention (.text + .data):
+253600 B = 247.66 KiB
+
+Static RAM (.data + .bss):
+636 B
+
+Compiler stack-usage:
+main             8 B
+score           80 B
+maha_distance   96 B
+can_ids_predict 64 B
+tree functions  <= 32 B observed in .su output
+
+The compiler stack-usage values are NOT summed as an estimate of
+peak stack because the functions do not all occupy their maximum
+stack simultaneously.
+
+Canary-observed inference stack high-water:
+DoS    196 B
+Fuzzy  196 B
+R      196 B
+RPM    196 B
+gear   196 B
+
+Static RAM + canary-observed inference stack:
+636 + 196 = 832 B
+
+This 832 B value is NOT claimed as total MCU Peak RAM.
+It excludes other runtime, interrupt, peripheral, driver, and
+possible RTOS memory requirements.
+
+
+RENODE EXECUTION MEASUREMENT
+----------------------------
+Target model: Cortex-M4
+Renode: 1.16.1 (portable project environment)
+
+Renode configuration observation:
+CyclesPerInstruction = 1
+PerformanceInMips = 100
+ElapsedCycles == ExecutedInstructions
+
+Therefore the following values are reported as Renode
+instruction-equivalent execution counts. They are NOT
+cycle-accurate Cortex-M4 hardware timing and are NOT converted
+to 168 MHz latency or formal WCET.
+
+
+REPRESENTATIVE INPUTS — CANONICAL BUILD
+---------------------------------------
+DoS       99770
+Fuzzy     95063
+R        102694
+RPM       97979
+gear     105397
+
+Observed maximum among these 5 representative inputs:
+105397 (gear)
+
+
+BROADER DETERMINISTIC SWEEP
+---------------------------
+Dataset:
+data_full/features_v2_idagnostic.parquet
+
+Region:
+is_test_region == True only
+
+Sampling:
+200 deterministic samples per true class
+DoS / Fuzzy / R / RPM / gear
+Total N = 1000
+Seed = 20260908
+
+Input CSV SHA256:
+17a240b3ea94344465eecaadaebc1deb62a848ef48a455627eb35e6e50f9f561
+
+Result CSV SHA256:
+35e44f13ae85f52690f0acf95c78daa954cc54ceed362f3eca78c97060ea06d6
+
+Overall Renode instruction-equivalent execution count:
+N       1000
+min     87689
+mean    98713.424
+median  100893
+p95     105962.7
+p99     109275.01
+max     111755
+
+Observed maximum sample:
+sample_id = 429
+true_label = R
+prediction_code = 0
+execution_count = 111755
+
+Features:
+freq_in_window       = 0.05
+unique_ids_in_window = 20
+entropy              = 2.155639
+mean_byte            = 71.750
+global_delta_zscore  = 5.041470
+global_value_zscore  = 2.039158
+
+Per-true-class observed maxima:
+DoS    107843
+Fuzzy  111046
+R      111755
+RPM    103566
+gear   105995
+
+The 111755 value is the observed maximum across this deterministic
+1000-input V2 test sweep. It is NOT a formal WCET bound.
+
+
+F5 INTERPRETATION
+-----------------
+The frozen V2 Python model was exported directly to deterministic C
+without retraining, and tested Python/C decisions matched on the
+10,000-sample parity set.
+
+The canonical Cortex-M4 build occupies approximately 247.66 KiB of
+Flash under the stated image-size convention and 636 B of static RAM.
+A stack canary measured 196 B of inference stack high-water on all
+five representative paths.
+
+Renode provides reproducible functional execution-path evidence and
+instruction-equivalent execution counts. It does not provide
+cycle-accurate Cortex-M4 WCET, physical inference latency, or actual
+MCU CPU-utilization proof.
+
+FINAL PHYSICAL-MCU ITEMS
+------------------------
+Still requiring measurement on the physical Cortex-M4 target:
+- actual hardware cycle count / WCET evidence
+- actual inference latency
+- actual CPU utilization
+- complete system Peak RAM including ISR/drivers/runtime
+- hardware behavior under concurrent ECU/CAN interrupt load
+
+These simulator results must therefore be presented as reproducible
+pre-hardware deployment evidence, not as substitutes for physical
+MCU measurements.

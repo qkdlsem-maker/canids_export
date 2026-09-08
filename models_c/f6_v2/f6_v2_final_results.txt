@@ -1,0 +1,402 @@
+F6 RENODE FINAL EVIDENCE — V2 HYBRID CAN IDS
+=============================================
+Date: 2026-09-08
+
+1. Scope
+--------
+Purpose:
+- Evaluate concurrent CAN RX interrupt handling, foreground IDS processing,
+  periodic ECU-like control task execution, sustained CAN load, saturation,
+  message-processing loss, and long-duration stability.
+- This is Renode simulation evidence prior to physical MCU validation.
+
+Execution path:
+SocketCAN(vcan1)
+ -> Renode SocketCANBridge
+ -> CANHub
+ -> STM32F4 CAN1 FIFO0
+ -> NVIC RX interrupt
+ -> software RX queue
+ -> V2 streaming feature extraction
+ -> frozen LightGBM + Mahalanobis Hybrid IDS
+
+RX ISR only captures/enqueues frames.
+Feature extraction and IDS inference execute in foreground.
+A periodic 100 Hz synthetic ECU-like control task executes concurrently
+and is prioritized over foreground IDS processing.
+
+IMPORTANT LIMITATION:
+Renode 1.16.1 is used as a functional/timing-accounting simulator here.
+These results are NOT physical STM32F4 throughput, physical CAN-bus bitrate,
+cycle-accurate WCET, or physical MCU validation.
+
+2. Frozen V2 Configuration
+--------------------------
+Features (6 ID-agnostic features):
+1) freq_in_window
+2) unique_ids_in_window
+3) entropy
+4) mean_byte
+5) global_delta_zscore
+6) global_value_zscore
+
+Window size: 20 frames
+Mahalanobis threshold: 10.104021265036314
+Standard 11-bit CAN IDs are used in the exact streaming-state implementation.
+
+Frozen model C SHA256:
+9bd26883dd20f81d40e04ba69e63ea7f75fed4fe0d63f2965b381e81ebcebb44
+
+Frozen feature statistics SHA256:
+04f3af021d6c9e3d52e6060c93d8fe14fd2a381242d8bbbeb93a0aee11d0f37b
+
+3. Toolchain / Simulator
+------------------------
+Compiler:
+arm-none-eabi-gcc (15:13.2.rel1-2) 13.2.1 20231009
+
+Renode:
+1.16.1 (1.16.1+20260903git478aad7e0)
+
+Target CPU model:
+Cortex-M4 / STM32F4 Discovery platform
+
+Control task:
+100 Hz
+Period = deadline = 10 ms
+Synthetic deterministic integer workload.
+This is not a production ECU control algorithm.
+
+4. Final IDS-ON Firmware
+------------------------
+ELF:
+models_c/f6_v2/f6_timed_test.elf
+
+ELF SHA256:
+6013549395a5b819242c3b541d1d96f78391d7140281667ed796e314ebe281b2
+
+main.c SHA256:
+36d49ef84bc67cde3a7639ce98b9aa0da26c23d6f476141f398736c6082f9eea
+
+startup.c SHA256:
+c301dd6e83d37246d5e380b479b741d3c53d808ad5a79765038bbd5fd4c56d30
+
+feature_v2_stream.c SHA256:
+811732a542c20a4471f4b202725ec02a62d02a733aef0ffd47f97f186e37c727
+
+feature_v2_stream.h SHA256:
+4ec1b30ab69158049469f27fff32e0429d176f069a677acc50b73ff023fbc6b9
+
+ELF size:
+text = 256533 B
+data = 304 B
+bss  = 17424 B
+
+Flash proxy (text + data):
+256837 B
+
+Static RAM (data + bss):
+17728 B
+
+These are linker-section measurements, not complete physical-system
+peak RAM measurements.
+
+5. Streaming Feature Validation
+-------------------------------
+The C V2 streaming feature implementation was compared against the
+Python V2 semantics on a deterministic 49-frame sequence.
+
+Observed maximum absolute differences:
+freq_in_window         = 0
+unique_ids_in_window   = 0
+entropy                = 4.4408920985006262e-16
+mean_byte              = 0
+global_delta_zscore    = 0
+global_value_zscore    = 0
+
+allclose(atol/rtol 1e-12): PASS
+
+This establishes numerical parity on the tested deterministic sequence,
+not a universal mathematical proof.
+
+An actual SocketCAN -> CAN1 IRQ -> queue -> feature path was also tested
+with a real bridged CAN frame and matched the Python reference features.
+
+6. Load / Saturation Results — IDS ON
+-------------------------------------
+All rates below are nominal sender rates unless otherwise stated.
+CAN1->IDS coverage is evaluated separately from Host->CAN1 delivery.
+
+500 fps:
+- CAN1->IDS coverage: 100%
+- SW queue overflow: 0
+- queue max depth: 5
+- control deadline miss: 0
+
+750 fps:
+- CAN1 RX: 7496 / host 7500
+- CAN1->IDS coverage: 100%
+- SW queue overflow: 0
+- queue max depth: 9
+- control deadline miss: 0
+
+812.5 fps:
+- host sent: 8125
+- CAN1 RX: 8118
+- CAN1->IDS coverage: 100%
+- SW queue overflow: 0
+- queue max depth: 10
+- control deadline miss: 0
+
+843.75 fps — repeat #1:
+- CAN1 RX: 8434
+- processed: 8434
+- SW queue overflow: 0
+- CAN1->IDS coverage: 100%
+- queue max depth: 10
+- control deadline miss: 0
+
+843.75 fps — repeat #2:
+- CAN1 RX: 8434
+- processed: 8434
+- SW queue overflow: 0
+- CAN1->IDS coverage: 100%
+- queue max depth: 11
+- control deadline miss: 0
+
+843.75 fps — repeat #3:
+- CAN1 RX: 8434
+- processed: 8434
+- SW queue overflow: 0
+- CAN1->IDS coverage: 100%
+- queue max depth: 11
+- control deadline miss: 0
+
+847.65625 fps — repeat #1:
+- CAN1 RX: 8473
+- processed: 8450
+- SW queue overflow: 23
+- CAN1->IDS coverage: 99.729%
+- queue max depth: 15
+- control deadline miss: 0
+
+847.65625 fps — repeat #2:
+- CAN1 RX: 8473
+- processed: 8450
+- SW queue overflow: 23
+- CAN1->IDS coverage: 99.729%
+- queue max depth: 15
+- control deadline miss: 0
+
+847.65625 fps — repeat #3:
+- CAN1 RX: 8471
+- processed: 8447
+- SW queue overflow: 24
+- CAN1->IDS coverage: 99.717%
+- queue max depth: 15
+- control deadline miss: 0
+
+851.5625 fps:
+- CAN1 RX: 8512
+- processed: 8449
+- SW queue overflow: 63
+- CAN1->IDS coverage: approximately 99.26%
+- queue max depth: 15
+- control deadline miss: 0
+
+859.375 fps:
+- CAN1 RX: 8590
+- processed: 8449
+- SW queue overflow: 141
+- CAN1->IDS coverage: approximately 98.36%
+- queue max depth: 15
+- control deadline miss: 0
+
+875 fps:
+- CAN1 RX: 8746
+- processed: 8449
+- SW queue overflow: 297
+- CAN1->IDS coverage: approximately 96.60%
+- queue max depth: 15
+- control deadline miss: 0
+
+1000 fps:
+- CAN1 RX: 9994
+- processed: 8449
+- SW queue overflow: 1545
+- CAN1->IDS coverage: approximately 84.54%
+- queue max depth: 15
+- control deadline miss: 0
+
+Observed reproducible transition:
+- 843.75 fps: 3/3 runs with 100% CAN1->IDS processing and zero SW overflow.
+- 847.65625 fps: 3/3 runs with SW queue overflow.
+
+Therefore the observed Renode internal lossless/lossy transition lies
+between approximately 843.75 and 847.66 fps for this exact firmware,
+simulator, queue size, control workload, and traffic protocol.
+
+This is NOT a physical STM32F4 maximum CAN throughput specification.
+
+7. 60-Minute Long-Duration Test
+-------------------------------
+Nominal load:
+500 fps for 3600 seconds
+
+Host intended frames:
+1,800,000
+
+Observed CAN1 RX:
+1,799,999
+
+RX timestamp span:
+3600.00 seconds
+
+HW FIFO overrun counter:
+1
+
+SW queue push:
+1,799,999
+
+SW queue overflow:
+0
+
+Processed:
+1,799,999
+
+Feature count:
+1,799,999
+
+Feature errors:
+0
+
+IDS calls:
+1,799,999
+
+Maximum SW queue depth:
+8 / 15 usable entries
+
+CAN1->IDS processing coverage:
+100%
+
+Control releases:
+384,412
+
+Control completions:
+384,412
+
+Control deadline misses:
+0
+
+Maximum control backlog:
+1
+
+Conclusion:
+During the 60-minute 500 fps Renode run, every frame successfully
+received by CAN1 was processed through the V2 feature and Hybrid IDS
+pipeline. No software queue overflow, feature error, or control deadline
+miss was observed.
+
+The single Host/CAN1 discrepancy and hardware-overrun counter are
+reported separately and are not attributed to IDS software queue loss.
+
+8. IDS ON vs IDS OFF A/B
+------------------------
+Purpose:
+Directly evaluate whether Hybrid IDS inference contributes to the
+foreground message-processing saturation boundary.
+
+IDS-OFF baseline:
+- CAN RX interrupt remains active.
+- SW queue remains active.
+- V2 feature extraction remains active.
+- 100 Hz control task remains active.
+- Hybrid LightGBM + Mahalanobis inference is disabled.
+
+IDS-OFF source:
+models_c/f6_v2/main_ids_off.c
+
+IDS-OFF source SHA256:
+e1cc7bbee05e5fb50d2d2c23892e38e7dfa48c7eaf95d37da5dfc72d19a68d42
+
+IDS-OFF ELF:
+models_c/f6_v2/f6_ids_off_test.elf
+
+IDS-OFF ELF SHA256:
+f591157c3b948a3c377c4f5a9c44e0fe7e09835393037afcd6903abc7f3df1e8
+
+IDS-OFF ELF size:
+text = 5925 B
+data = 304 B
+bss  = 17408 B
+
+At approximately 847.65625 fps:
+
+IDS ON:
+- 3/3 runs showed SW queue overflow.
+- processing coverage approximately 99.72%.
+- queue reached usable capacity 15.
+- control deadline misses: 0.
+
+IDS OFF:
+- CAN1 RX: 8471
+- queue push: 8471
+- queue overflow: 0
+- processed: 8471
+- feature count: 8471
+- feature errors: 0
+- CAN1->processing coverage: 100%
+- queue max depth: 3
+- control deadline misses: 0
+- control max backlog: 1
+
+Interpretation:
+Under this exact Renode configuration, disabling Hybrid IDS inference
+eliminated the software queue overflow observed at approximately
+847.66 fps while retaining feature extraction and the concurrent control
+task. This provides direct A/B evidence that IDS inference contributes
+to the simulated foreground processing saturation boundary.
+
+At the same time, the prioritized 100 Hz synthetic control task showed
+zero deadline misses in the tested IDS-ON load conditions, including
+conditions where the foreground CAN/IDS queue saturated.
+
+9. F6 Conclusion
+----------------
+Within the tested Renode environment:
+
+- CAN RX interrupt handling and software queue operation were validated.
+- The final frozen V2 six-feature Hybrid IDS operated on the actual
+  SocketCAN -> CAN1 -> IRQ -> queue data path.
+- A concurrent 100 Hz synthetic ECU-like control task was maintained.
+- The observed reproducible IDS-ON internal lossless/lossy transition
+  was bounded between approximately 843.75 and 847.66 fps.
+- 843.75 fps was internally lossless in 3/3 repeated runs.
+- 847.65625 fps produced queue overflow in 3/3 repeated IDS-ON runs.
+- A 60-minute 500 fps run produced 100% CAN1->IDS processing coverage,
+  zero SW queue overflow, zero feature errors, and zero control
+  deadline misses.
+- IDS-OFF A/B testing at approximately 847.66 fps produced 100%
+  CAN1->processing coverage and zero SW queue overflow, demonstrating
+  that Hybrid IDS inference contributes to the simulated processing
+  saturation boundary.
+- No tested IDS-ON condition produced a deadline miss in the prioritized
+  100 Hz synthetic control task.
+
+10. Remaining Physical-MCU Validation
+-------------------------------------
+Renode results must not be presented as physical MCU proof.
+
+After the STM32F4/Cortex-M4 hardware arrives, repeat/measure:
+- physical CAN RX behavior under real bus arbitration/bit timing
+- actual inference latency
+- actual CPU utilization
+- actual cycles / WCET-oriented measurements
+- complete system peak RAM
+- interrupt/control-task interference
+- physical FIFO/message loss
+- maximum sustainable real CAN load
+- long-duration physical operation
+
+F6 Renode/pre-hardware simulation stage: COMPLETE.
+Physical MCU validation: PENDING.

@@ -28,8 +28,8 @@ CAN 버스는 발신자 인증·암호화가 없어 DoS/Fuzzing/Spoofing 공격�
 | F3 | CAN ID 의존 낮은 feature set 재설계 | ID-agnostic 6피처 설계, V1/V2 모두 전체데이터 기준 ROAD 공정비교(V1 FPR 100%실패 vs V2 FPR 0.08% (정확값 0.079932%)) | ✅ 완료 |
 | HCRL 내부 zero-day 탐지(Hybrid) | 기존 동일-domain/held-out 평가에서 99.9~100% 수준 |
 | ROAD 외부 일반화 — V2 frozen threshold | TPR 12.398709%, FPR 0.079932%, Balanced Accuracy 56.159388% |
-| F5 | 실제 MCU Flash/RAM/CPU/WCET/탐지지연 | ARM Cortex-M4 크로스컴파일 + Renode 에뮬레이션. Renode 공식 `ElapsedCycles`(진짜 사이클 카운터)로 실측: Flash 254KB, 정적RAM 1.7KB, 최악(Fuzzy) WCET 908,880cycles=5.41ms(168MHz) | 🟢 완료(시뮬레이션 기준) |
-| F6 | 기존 ECU 기능과 동시 동작(장시간·최대부하) | SysTick 동시성 + Renode bxCAN FIFO 대조실험에 더해 host SocketCAN/vcan 부하·장시간 검증. **약 17.2k observed fps에서 3/3회 100% processing coverage**, 약 20k fps에서 59분 steady-state 운용 시 throughput·latency·CPU·RSS의 유의한 열화 없음. 실제 MCU CAN FIFO/장시간 silicon 검증은 별도 필요 | 🟢 Host/시뮬레이션 검증 완료 |
+| F5 | 실제 MCU Flash/RAM/CPU/WCET/탐지지연 | Frozen V2 6-feature C export를 Cortex-M4로 검증. Canonical build 기준 Flash proxy **247.66 KiB**, static RAM **636 B**. Renode에서는 instruction-equivalent count를 측정하며 실제 MCU cycle/WCET/latency로 환산하지 않음 | 🟡 Renode/pre-hardware 완료 · physical MCU pending |
+| F6 | 기존 ECU 기능과 동시 동작(장시간·최대부하) | CAN1 FIFO0→RX IRQ→SW queue→V2 feature→Frozen Hybrid와 100 Hz synthetic control task를 동시 실행. **843.75 fps는 3/3 internal lossless**, **847.65625 fps는 3/3 SW-queue loss 발생**. 60분 nominal 500 fps에서 CAN1 수신 프레임 전부 처리, SW overflow 0, control deadline miss 0 | 🟡 Renode/pre-hardware 완료 · physical MCU pending |
 | F7 | (선행 결함) C 변환기 정상 클래스 인덱스 오류 | NORMAL_IDX/CODE_MAP 도입, x86+ARM 회귀테스트로 검증 | ✅ 완료 |
 
 **F5/F6 남은 한계**: formal WCET는 대표 입력에 대한 실측이며 모든 입력의 수학적 최악값 증명은 아니다. Renode bxCAN 및 Linux SocketCAN/vcan에서 FIFO·최대부하·약 1시간 장시간 안정성을 보강 검증했지만, **실제 target MCU silicon에서의 CAN-controller FIFO overflow immunity, CPU/resource behavior, 장시간 연속 운용은 아직 검증하지 않았다.** 따라서 Renode/host-side 결과는 실제 하드웨어 검증과 구분하여 보고한다.
@@ -54,8 +54,8 @@ CAN 버스 실시간 스트림
 | HCRL 내부 zero-day 탐지(Hybrid) | 기존 동일-domain/held-out 평가에서 99.9~100% 수준 |
 | ROAD 외부 일반화 — V2 frozen threshold | TPR 12.398709%, FPR 0.079932%, Balanced Accuracy 56.159388% |
 | 하이브리드 e2e 지연 | 0.11~0.31ms (PC 기준) |
-| MCU Flash / 정적 RAM | 254KB / 1.7KB |
-| MCU WCET(5클래스, 168MHz, Renode ElapsedCycles 실측) | 2.18~5.41ms (최악: Fuzzy) |
+| Cortex-M4 Flash proxy / static RAM | **247.66 KiB / 636 B** (Frozen V2 canonical build) |
+| Renode inference execution count | 대표 입력 **95,063~105,397**, 1,000-sample sweep **87,689~111,755 instruction-equivalent counts** |
 
 ---
 
@@ -67,7 +67,7 @@ CAN 버스 실시간 스트림
 | `data_full/` | HCRL 전체(DoS/Fuzzy/gear/RPM_dataset.csv, 1,657만 행, 실제 타임스탬프) | **F2 이후 모든 실험의 기준 데이터** |
 | `road_data/` | ORNL ROAD Dataset(공격/정상 각각) | F3 교차검증 전용 |
 
-**모델도 2가지가 공존합니다**: `models_c/can_ids_embedded.c`(서브셋 학습, 구버전) vs `models_c/can_ids_embedded_full.c`(전체데이터 학습, **최종 채택**). MCU 검증(F5/F6)은 `can_ids_embedded_full.c` 기준입니다.
+**최종 embedded 모델은 `models_c/can_ids_embedded_v2.c`입니다.** Frozen V2는 6개의 CAN-ID-independent feature를 사용하며, `NORMAL_IDX=2`, `CODE_MAP={1,2,0,3,4}`, Mahalanobis threshold `10.104021265036314`를 사용합니다. 기존 `can_ids_embedded.c`와 `can_ids_embedded_full.c`는 이전 실험 계열로만 유지하며 F5/F6 최종 pre-hardware 결과의 기준이 아닙니다.
 
 ---
 
@@ -101,25 +101,18 @@ python3 src/28_road_test_v2_corrected.py       # capture_metadata.json 기반 �
 ### 5.4 MCU 검증 (F5/F6)
 ```bash
 cd models_c
-python3 07_export_to_c.py                  # data_full 기준 C 코드 생성 (can_ids_embedded_full.c)
-cp can_ids_embedded_full.c fw_test/can_ids_embedded.c
-cd fw_test
-arm-none-eabi-gcc -mcpu=cortex-m4 -mthumb -mfloat-abi=soft -O2 -nostartfiles \
-  -T linker.ld -o can_ids_fw.elf startup.c main.c -lm --specs=nosys.specs
-cd ../renode_portable
-./renode --console -e "include @../run_ids3.resc"
+python3 08_export_v2_to_c.py        # Frozen V2 6-feature C export
+# Final embedded model: models_c/can_ids_embedded_v2.c
+# Final F5 bundle: f5_benchmark_v2/
 ```
 
-### 5.4.1 F6 — 실제 bxCAN FIFO 오버런 재현
-```bash
-sudo ip link add dev vcan1 type vcan 2>/dev/null; sudo ip link set up vcan1
 
-cd models_c/can_fw
-arm-none-eabi-gcc -mcpu=cortex-m4 -mthumb -mfloat-abi=soft -O2 -nostartfiles \
-  -T linker.ld -o can_test_fw.elf startup.c main.c -lm --specs=nosys.specs
-cd ..
-./renode_portable/renode --console -e "include @run_can_test.resc"
-```
+F5/F6 최종 증거 파일:
+
+- `models_c/f5_v2_final_results.txt`
+- `models_c/f6_v2/f6_v2_final_results.txt`
+
+> F5/F6는 Renode/pre-hardware 검증 완료 상태이며 실제 MCU silicon 측정은 pending이다.
 
 ### 5.5 실시간 스트리밍 검증 — ICSim (F1)
 ```bash
@@ -338,21 +331,37 @@ canids_export/
 ├── models_c/
 │ ├── 07_export_to_c.py
 │ ├── can_ids_embedded.c
-│ ├── can_ids_embedded_full.c
+│ ├── can_ids_embedded_v2.c # Frozen V2 최종 embedded model
 │ ├── test_main*.c
 │ ├── renode_portable/
 │ ├── fw_test/ # F5 ElapsedCycles 측정용
-│ ├── can_fw/ # 실제 bxCAN 드라이버(F6 FIFO 오버런 실측용)
-│ └── run_can_test.resc # vcan1↔canHub↔CAN1 연결 스크립트
 └── results/
+
+---
+
+## 6.1 심사용 Offline Dashboard
+
+본선 시연용 Flask dashboard는 인터넷 연결 없이 `localhost`에서 동작한다. 저장된 판정 결과를 표시하는 방식이 아니라 실제 CAN replay frame을 Frozen V2 pipeline에 입력하여 feature와 prediction을 실행 중 계산한다.
+
+- `NORMAL`: ICSim baseline
+- `DoS`: known attack
+- `FUZZY`: known attack
+- `SPOOF`: unknown-style anomaly replay
+- ROAD: Live Demo와 분리된 External Validation evidence
+
+Windows 실행: `run_demo.bat`
+
+실행 전 `dashboard/preflight.py`가 Python package, frozen model, 6-feature structure, Mahalanobis threshold, demo bundle integrity를 검사한다. 실제 본선용 Windows 노트북에서 Wi-Fi를 끈 상태로 브라우저 자동 실행과 4개 replay scenario 동작을 검증하였다.
+
+> Windows LightGBM native loader의 비-ASCII path 문제가 확인되어 심사용 package는 `C:\JARVIS\jarvis_demo`와 같은 ASCII-only path에서 실행하도록 검증하였다.
 
 ---
 
 ## 7. 알려진 한계 (Known Limitations)
 
 1. **F5 CPU 점유율**: 베어메탈 단일 태스크 환경이라 측정 안 함. RTOS 환경에서 재정의 필요.
-2. **F5 formal WCET**: Renode `ElapsedCycles`(진짜 사이클 카운터)로 5클래스 대표 샘플 기준 실측(최악 Fuzzy 5.41ms)했으나, 모든 가능한 입력에 대한 수학적 최악값(formal WCET)은 아님. 실제 실리콘 실측도 아직 아님(시뮬레이션 기준).
-3. **F6 장시간 연속운용**: 실제 bxCAN 페리페럴로 5,000건 집중 전송 시 FIFO 오버런 0건까지 실측했으나, 수 시간 단위 연속 운용은 미검증(시뮬레이션 시간 제약).
+2. **F5 timing limitation**: Renode 실행 수치는 instruction-equivalent count이며 실제 MCU의 cycle-accurate WCET 또는 latency로 환산하지 않는다. Physical MCU timing 측정은 pending이다.
+3. **F6 physical validation**: Renode에서 60분 concurrent test와 부하 경계시험을 완료했으나, 실제 MCU silicon에서의 CAN-controller behavior 및 장시간 연속운용은 pending이다.
 4. **F3 ROAD 일부 공격 유형**: `max_speedometer`/`reverse_light` 계열(값-고정형 스푸핑)은 정밀 재평가해도 탐지율 0% — ID-agnostic 피처의 구조적 한계로 판단됨.
 5. **평가 방법론 일반**: 배경 트래픽 밀도가 높은 환경에서는 "시간구간 기준" recall이 아니라 "실제 공격 메시지 기준" recall을 써야 함 — F1/F3 양쪽에서 반복 확인된 교훈.
 

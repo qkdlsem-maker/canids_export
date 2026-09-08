@@ -1,0 +1,37 @@
+mach create "f5v2_R"
+machine LoadPlatformDescription @../../renode_portable/platforms/boards/stm32f4_discovery-kit.repl
+sysbus LoadELF @../f5_benchmark_v2.elf
+
+# Stop after startup/BSS initialization, before g_case_index is read.
+sysbus.cpu AddHook 0x0800009C "cpu.Pause()"
+start
+
+# Select benchmark case after startup initialization.
+sysbus WriteDoubleWord 0x2000013C 2
+
+# Stop immediately before can_ids_predict().
+sysbus.cpu RemoveAllHooks
+sysbus.cpu AddHook 0x080000B0 "cpu.Pause()"
+sysbus.cpu Resume
+
+echo "===== CASE 2: R START ====="
+sysbus ReadDoubleWord 0x2000013C
+sysbus.cpu ElapsedCycles
+sysbus.cpu ExecutedInstructions
+
+# Run inference and stop immediately after return.
+sysbus.cpu RemoveAllHooks
+sysbus.cpu AddHook 0x080000B4 "cpu.Pause()"
+sysbus.cpu Resume
+
+echo "===== CASE 2: R END ====="
+sysbus.cpu ElapsedCycles
+sysbus.cpu ExecutedInstructions
+
+# Execute result/done stores.
+sysbus.cpu RemoveAllHooks
+sysbus.cpu Step 4
+
+echo "===== CASE 2: R RESULT expected=0 ====="
+sysbus ReadDoubleWord 0x20000000
+sysbus ReadDoubleWord 0x20000130

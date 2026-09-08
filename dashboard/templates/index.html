@@ -1,0 +1,416 @@
+<!doctype html>
+<html lang="ko">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>J.A.R.V.I.S · CAN IDS</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+
+<body>
+<div class="app-shell">
+
+    <header class="topbar">
+        <div>
+            <div class="eyebrow">AUTOMOTIVE CYBERSECURITY · CAN IDS</div>
+            <h1>J.A.R.V.I.S</h1>
+            <p>Hybrid CAN Intrusion Detection System</p>
+        </div>
+
+        <div class="system-status">
+            <span id="statusDot" class="status-dot"></span>
+            <div>
+                <strong id="systemStatus">CONNECTING</strong>
+                <small>Frozen V2 · LightGBM + Mahalanobis</small>
+            </div>
+        </div>
+    </header>
+
+
+    <section class="hero-grid">
+
+        <div class="panel scenario-panel">
+            <div class="panel-heading">
+                <div>
+                    <span class="section-number">01</span>
+                    <h2>Demo Scenario</h2>
+                </div>
+                <span class="tag">REAL CAN REPLAY</span>
+            </div>
+
+            <p class="panel-description">
+                실제 CAN 데이터를 Frozen V2 파이프라인으로 재생합니다.
+                판정 결과는 저장된 값이 아니라 실행 중 다시 계산됩니다.
+            </p>
+
+            <div id="scenarioButtons" class="scenario-buttons">
+                <button class="scenario scenario-normal active" data-scenario="normal">
+                    <span>NORMAL</span>
+                    <small>Baseline · ICSim</small>
+                </button>
+
+                <button class="scenario scenario-known" data-scenario="dos">
+                    <span>DoS</span>
+                    <small>Known Attack</small>
+                </button>
+
+                <button class="scenario scenario-known" data-scenario="fuzzy">
+                    <span>FUZZY</span>
+                    <small>Known Attack</small>
+                </button>
+
+                <button class="scenario scenario-unknown" data-scenario="spoof">
+                    <span>SPOOF</span>
+                    <small>Unknown-style Anomaly</small>
+                </button>
+            </div>
+
+            <div class="demo-controls">
+                <button id="runButton" class="run-button">
+                    ▶ RUN DEMO
+                </button>
+
+                <button id="stopButton" class="secondary-button">
+                    ■ STOP
+                </button>
+
+                <button id="resetButton" class="secondary-button">
+                    ↻ RESET
+                </button>
+            </div>
+
+            <div class="scenario-meta">
+                <div>
+                    <span>SELECTED</span>
+                    <strong id="selectedScenario">Normal</strong>
+                </div>
+                <div>
+                    <span>SOURCE</span>
+                    <strong id="scenarioSource">ICSim normal candump</strong>
+                </div>
+            </div>
+        </div>
+
+
+        <div id="decisionHero" class="panel decision-hero normal">
+            <div class="panel-heading">
+                <div>
+                    <span class="section-number">02</span>
+                    <h2>Final Decision</h2>
+                </div>
+                <span id="decisionStageTag" class="tag">WAITING</span>
+            </div>
+
+            <div class="decision-center">
+                <div id="decisionIcon" class="decision-icon">✓</div>
+                <div id="finalDecision" class="decision-text">READY</div>
+                <div id="decisionSubtext" class="decision-subtext">
+                    Select a scenario and run the demo
+                </div>
+            </div>
+
+            <div class="decision-stats">
+                <div>
+                    <span>Mahalanobis</span>
+                    <strong id="mahaDistance">—</strong>
+                </div>
+                <div>
+                    <span>Threshold</span>
+                    <strong id="mahaThreshold">10.104</strong>
+                </div>
+            </div>
+        </div>
+
+    </section>
+
+
+    <section class="panel pipeline-panel">
+        <div class="panel-heading">
+            <div>
+                <span class="section-number">03</span>
+                <h2>Live Detection Pipeline</h2>
+            </div>
+
+            <span class="tag">6 ID-AGNOSTIC FEATURES</span>
+        </div>
+
+        <div class="pipeline">
+
+            <div class="pipeline-node">
+                <span class="node-label">CAN FRAME</span>
+                <strong id="currentCanId">---</strong>
+                <small id="currentPayload">----------------</small>
+            </div>
+
+            <div class="arrow">→</div>
+
+            <div class="pipeline-node">
+                <span class="node-label">V2 FEATURES</span>
+                <strong>6-D</strong>
+                <small>ID-agnostic</small>
+            </div>
+
+            <div class="arrow">→</div>
+
+            <div class="pipeline-node">
+                <span class="node-label">LIGHTGBM</span>
+                <strong id="lgbmClass">—</strong>
+                <small id="lgbmProbability">Probability —</small>
+            </div>
+
+            <div class="arrow">→</div>
+
+            <div class="pipeline-node">
+                <span class="node-label">MAHALANOBIS</span>
+                <strong id="pipelineDistance">—</strong>
+                <small id="pipelineThreshold">Threshold 10.104</small>
+            </div>
+
+            <div class="arrow">→</div>
+
+            <div id="pipelineDecision" class="pipeline-node final-node">
+                <span class="node-label">DECISION</span>
+                <strong>READY</strong>
+                <small>Hybrid</small>
+            </div>
+
+        </div>
+    </section>
+
+
+    <section class="middle-grid">
+
+        <div class="panel">
+            <div class="panel-heading">
+                <div>
+                    <span class="section-number">04</span>
+                    <h2>Live CAN Traffic</h2>
+                </div>
+
+                <div class="traffic-status"><span id="trafficProgress">0 / 0</span><span id="trafficState" class="tag">IDLE</span></div>
+            </div>
+
+            <div id="trafficLog" class="traffic-log">
+                <div class="empty-log">
+                    CAN traffic will appear here.
+                </div>
+            </div>
+        </div>
+
+
+        <div class="panel">
+            <div class="panel-heading">
+                <div>
+                    <span class="section-number">05</span>
+                    <h2>Feature Vector</h2>
+                </div>
+                <span class="tag">STREAMING</span>
+            </div>
+
+            <div class="feature-grid">
+                <div class="feature">
+                    <span>Frequency</span>
+                    <strong id="fFreq">—</strong>
+                </div>
+
+                <div class="feature">
+                    <span>Unique IDs</span>
+                    <strong id="fUnique">—</strong>
+                </div>
+
+                <div class="feature">
+                    <span>Entropy</span>
+                    <strong id="fEntropy">—</strong>
+                </div>
+
+                <div class="feature">
+                    <span>Mean Byte</span>
+                    <strong id="fMean">—</strong>
+                </div>
+
+                <div class="feature">
+                    <span>Global Δ Z-score</span>
+                    <strong id="fDelta">—</strong>
+                </div>
+
+                <div class="feature">
+                    <span>Global Value Z-score</span>
+                    <strong id="fValue">—</strong>
+                </div>
+            </div>
+        </div>
+
+    </section>
+
+
+    <section class="counter-grid">
+
+        <div class="counter">
+            <span>PROCESSED</span>
+            <strong id="countProcessed">0</strong>
+        </div>
+
+        <div class="counter normal-counter">
+            <span>NORMAL</span>
+            <strong id="countNormal">0</strong>
+        </div>
+
+        <div class="counter known-counter">
+            <span>KNOWN ATTACK</span>
+            <strong id="countKnown">0</strong>
+        </div>
+
+        <div class="counter unknown-counter">
+            <span>UNKNOWN</span>
+            <strong id="countUnknown">0</strong>
+        </div>
+
+        <div class="counter unsupported-counter">
+            <span>UNSUPPORTED</span>
+            <strong id="countUnsupported">0</strong>
+        </div>
+
+        <div class="counter">
+            <span>REPLAY RATE</span>
+            <strong><span id="demoRate">0</span> fps</strong><small class="counter-note">Visualization only</small>
+        </div>
+
+    </section>
+
+
+    <section class="panel evidence-panel">
+        <div class="panel-heading">
+            <div>
+                <span class="section-number">06</span>
+                <h2>Experimental Evidence</h2>
+            </div>
+
+            <span class="tag">F1 → F6</span>
+        </div>
+
+        <div class="evidence-grid">
+
+            <article>
+                <span>F1 · ICSim</span>
+                <strong>99.98%</strong>
+                <p>End-to-end attack recall</p>
+                <small>Independent GT · 9,485 injections</small>
+            </article>
+
+            <article>
+                <span>F2 · Full HCRL</span>
+                <strong>16.57M</strong>
+                <p>Full-scale CAN records</p>
+                <small>Not a 5% subset</small>
+            </article>
+
+            <article>
+                <span>F3 · ID-agnostic</span>
+                <strong>6 Features</strong>
+                <p>CAN-ID-independent representation</p>
+                <small>Frozen V2 feature set</small>
+            </article>
+
+            <article>
+                <span>F4 · Ablation</span>
+                <strong>Hybrid</strong>
+                <p>LightGBM + Mahalanobis</p>
+                <small>Known + unknown detection roles</small>
+            </article>
+
+            <article>
+                <span>F5 · Cortex-M4</span>
+                <strong>247.66 KiB</strong>
+                <p>Renode Flash proxy</p>
+                <small>Static RAM 636 B · pre-hardware</small>
+            </article>
+
+            <article>
+                <span>F6 · Concurrent</span>
+                <strong>843.75 fps</strong>
+                <p>3/3 internal lossless</p>
+                <small>Renode · 0 control deadline misses</small>
+            </article>
+
+        </div>
+
+        <div class="evidence-note">
+            <strong>Scope:</strong>
+            Live Demo는 파이프라인 동작을 보여주는 실제 replay이며,
+            위 성능 수치는 별도의 전체 실험 결과입니다.
+            F5/F6의 물리 MCU 측정은 실제 보드 적용 단계에서 추가됩니다.
+        </div>
+    </section>
+
+
+    <section class="panel external-panel">
+        <div class="panel-heading">
+            <div>
+                <span class="section-number">07</span>
+                <h2>External Validation</h2>
+            </div>
+
+            <span class="tag">ROAD DATASET</span>
+        </div>
+
+        <div class="external-validation-grid">
+
+            <article class="external-metric">
+                <span>ATTACK TPR</span>
+                <strong>12.4%</strong>
+                <small>Frozen V2 · full ROAD evaluation</small>
+            </article>
+
+            <article class="external-metric">
+                <span>NORMAL FPR</span>
+                <strong>0.08%</strong>
+                <small>Low false-positive rate on external normal traffic</small>
+            </article>
+
+            <article class="external-metric">
+                <span>BALANCED ACCURACY</span>
+                <strong>56.2%</strong>
+                <small>Cross-dataset zero-day evaluation</small>
+            </article>
+
+        </div>
+
+        <div class="external-summary">
+            <div>
+                <strong>What this proves</strong>
+                <p>
+                    Frozen V2 was evaluated on an external CAN dataset that was
+                    not used for model training or threshold selection.
+                </p>
+            </div>
+
+            <div>
+                <strong>Observed limitation</strong>
+                <p>
+                    External zero-day generalization remains limited:
+                    false positives are low, but attack recall is modest.
+                    ROAD results are therefore presented as validation evidence,
+                    not as a Live Demo success metric.
+                </p>
+            </div>
+        </div>
+
+        <div class="evidence-note">
+            <strong>Separation from Live Demo:</strong>
+            ROAD 수치는 전체 frozen V2 외부평가 결과이며,
+            위 Live Demo replay의 프레임별 결과와는 별도의 실험입니다.
+        </div>
+    </section>
+
+
+    <footer>
+        <span>J.A.R.V.I.S · Frozen V2</span>
+        <span>Offline Localhost Demo</span>
+        <span>Standard 11-bit CAN</span>
+    </footer>
+
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
