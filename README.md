@@ -34,6 +34,8 @@ CAN 버스는 발신자 인증·암호화가 없어 DoS/Fuzzing/Spoofing 공격�
 
 **F5/F6 남은 한계**: formal WCET는 대표 입력에 대한 실측이며 모든 입력의 수학적 최악값 증명은 아니다. Renode bxCAN 및 Linux SocketCAN/vcan에서 FIFO·최대부하·약 1시간 장시간 안정성을 보강 검증했지만, **실제 target MCU silicon에서의 CAN-controller FIFO overflow immunity, CPU/resource behavior, 장시간 연속 운용은 아직 검증하지 않았다.** 따라서 Renode/host-side 결과는 실제 하드웨어 검증과 구분하여 보고한다.
 
+**Physical MCU validation 진행 상황 (2026-09-08)**: 실제 **NUCLEO-F446RE (STM32F446RE, Cortex-M4)** 보드를 확보했으며, STM32CubeProgrammer에서 ST-LINK/SWD 연결과 target 인식을 확인했다(Device ID `0x421`, NVM `512 KB`). STM32CubeMX/CubeIDE 기반 bring-up 프로젝트도 생성했다. 현재 단계는 **hardware bring-up 진행 중**이며, 실제 MCU에서의 Frozen V2 inference, DWT cycle/timing, CAN RX, F5/F6 부하·장시간 검증 결과는 아직 확정하지 않았다.
+
 ---
 
 ## 3. 최종 시스템 아키텍처
