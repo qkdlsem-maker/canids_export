@@ -1,0 +1,50 @@
+JARVIS Frozen V2 - Physical MCU F5 100K Results
+================================================
+
+Target
+------
+Board: NUCLEO-F446RE
+MCU: STM32F446RE
+Core clock: 84,000,000 Hz
+
+Test
+----
+Measured inferences: 100,000
+Workload: 8 fixed validation vectors repeated 12,500 times
+Parity failures: 0
+
+DWT Cycle Measurements
+----------------------
+Minimum: 132,195 cycles
+Mean: 154,103.09564 cycles
+Maximum observed: 166,086 cycles
+Cycle sum: 15,410,309,564
+
+Latency at 84 MHz
+-----------------
+Minimum: 1.574 ms
+Mean: 1.835 ms
+Maximum observed: 1.977 ms
+
+RAM / Stack Measurements
+------------------------
+RAM test done: 1
+RAM test valid: 1
+Static RAM measured by ramtest: 524 bytes
+Observed stack high-water: 368 bytes
+Static RAM + observed stack: 892 bytes
+Reserved stack: 1,024 bytes
+Stack scan exhausted: 0
+Reserved stack exceeded: 0
+
+Interpretation
+--------------
+- All 100,000 measured physical MCU inference calls matched the expected decisions.
+- No parity failure was observed.
+- Mean inference latency was approximately 1.835 ms at 84 MHz.
+- Maximum observed inference latency was approximately 1.977 ms.
+- The maximum value above is an observed maximum, not a formal WCET bound.
+- The 100,000 runs are repeated executions over 8 fixed validation vectors,
+  not 100,000 distinct CAN samples.
+- The 892-byte value is static RAM measured by the benchmark plus observed
+  stack high-water; it is not claimed as an absolute whole-system peak RAM bound.

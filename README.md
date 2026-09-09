@@ -28,13 +28,13 @@ CAN 버스는 발신자 인증·암호화가 없어 DoS/Fuzzing/Spoofing 공격�
 | F3 | CAN ID 의존 낮은 feature set 재설계 | ID-agnostic 6피처 설계, V1/V2 모두 전체데이터 기준 ROAD 공정비교(V1 FPR 100%실패 vs V2 FPR 0.08% (정확값 0.079932%)) | ✅ 완료 |
 | HCRL 내부 zero-day 탐지(Hybrid) | 기존 동일-domain/held-out 평가에서 99.9~100% 수준 |
 | ROAD 외부 일반화 — V2 frozen threshold | TPR 12.398709%, FPR 0.079932%, Balanced Accuracy 56.159388% |
-| F5 | 실제 MCU Flash/RAM/CPU/WCET/탐지지연 | Frozen V2 6-feature C export를 Cortex-M4로 검증. Canonical build 기준 Flash proxy **247.66 KiB**, static RAM **636 B**. Renode에서는 instruction-equivalent count를 측정하며 실제 MCU cycle/WCET/latency로 환산하지 않음 | 🟡 Renode/pre-hardware 완료 · physical MCU pending |
+| F5 | 실제 MCU Flash/RAM/CPU/WCET/탐지지연 | Frozen V2 6-feature C export를 Cortex-M4로 검증. Canonical build 기준 Flash proxy **247.66 KiB**, static RAM **636 B**. Renode에서는 instruction-equivalent count를 측정하며 실제 MCU cycle/WCET/latency로 환산하지 않음 | 🟢 Renode/pre-hardware + physical MCU F5 완료 |
 | F6 | 기존 ECU 기능과 동시 동작(장시간·최대부하) | CAN1 FIFO0→RX IRQ→SW queue→V2 feature→Frozen Hybrid와 100 Hz synthetic control task를 동시 실행. **843.75 fps는 3/3 internal lossless**, **847.65625 fps는 3/3 SW-queue loss 발생**. 60분 nominal 500 fps에서 CAN1 수신 프레임 전부 처리, SW overflow 0, control deadline miss 0 | 🟡 Renode/pre-hardware 완료 · physical MCU pending |
 | F7 | (선행 결함) C 변환기 정상 클래스 인덱스 오류 | NORMAL_IDX/CODE_MAP 도입, x86+ARM 회귀테스트로 검증 | ✅ 완료 |
 
 **F5/F6 남은 한계**: formal WCET는 대표 입력에 대한 실측이며 모든 입력의 수학적 최악값 증명은 아니다. Renode bxCAN 및 Linux SocketCAN/vcan에서 FIFO·최대부하·약 1시간 장시간 안정성을 보강 검증했지만, **실제 target MCU silicon에서의 CAN-controller FIFO overflow immunity, CPU/resource behavior, 장시간 연속 운용은 아직 검증하지 않았다.** 따라서 Renode/host-side 결과는 실제 하드웨어 검증과 구분하여 보고한다.
 
-**Physical MCU validation 진행 상황 (2026-09-08)**: 실제 **NUCLEO-F446RE (STM32F446RE, Cortex-M4)** 보드를 확보했으며, STM32CubeProgrammer에서 ST-LINK/SWD 연결과 target 인식을 확인했다(Device ID `0x421`, NVM `512 KB`). STM32CubeMX/CubeIDE 기반 bring-up 프로젝트도 생성했다. 현재 단계는 **hardware bring-up 진행 중**이며, 실제 MCU에서의 Frozen V2 inference, DWT cycle/timing, CAN RX, F5/F6 부하·장시간 검증 결과는 아직 확정하지 않았다.
+**Physical MCU F5 validation 완료 (2026-09-10)**: 실제 **NUCLEO-F446RE (STM32F446RE, Cortex-M4, 84 MHz)**에서 Frozen V2 IDS를 구동했다. 8개의 고정 검증 벡터를 12,500회 반복하여 총 **100,000회 physical inference**를 측정했으며, expected decision 대비 **parity failure 0회**를 확인했다. DWT cycle 기준 최소 **132,195 cycles (1.574 ms)**, 평균 **154,103.096 cycles (1.835 ms)**, 관측 최대 **166,086 cycles (1.977 ms)**였다. RAM 계측에서는 static RAM **524 B**, observed stack high-water **368 B**였으며 reserved stack 1,024 B 초과는 발생하지 않았다. 100,000회는 서로 다른 100,000개 CAN 샘플이 아니라 8개 검증 벡터에 대한 반복 안정성 시험이며, 관측 최대값은 formal WCET가 아니다. 재현 코드와 원본 측정 결과는 `models_c/f5_physical_100k/`에 보존한다. **F6의 실제 CAN-controller 부하·장시간 physical validation은 아직 완료되지 않았으며 Renode 결과와 구분한다.**
 
 ---
 
