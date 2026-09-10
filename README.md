@@ -105,36 +105,77 @@ python3 src/28_road_test_v2_corrected.py       # capture_metadata.json 기반 �
 ### 5.4 MCU 검증 (F5/F6)
 ```bash
 cd models_c
-python3 08_export_v2_to_c.py        # Frozen V2 6-feature C export
+python3 08_export_v2_to_c.py
 # Final embedded model: models_c/can_ids_embedded_v2.c
-# Final F5 bundle: f5_benchmark_v2/
+# Renode F5 benchmark: f5_benchmark_v2/
+# Physical MCU F5 100K validation: f5_physical_100k/
 ```
 
 
 F5/F6 최종 증거 파일:
 
-- `models_c/f5_v2_final_results.txt`
-- `models_c/f6_v2/f6_v2_final_results.txt`
+- `models_c/f5_v2_final_results.txt` — Renode/pre-hardware F5 결과
+- `models_c/f5_physical_100k/f5_physical_100k_results.txt` — 실제 STM32F446RE 100K F5 결과
+- `models_c/f6_v2/f6_v2_final_results.txt` — Renode F6 결과
 
-> F5/F6는 Renode/pre-hardware 검증 완료 상태이며 실제 MCU silicon 측정은 pending이다.
+> F5는 실제 NUCLEO-F446RE(STM32F446RE, 84 MHz)에서 100,000회 physical inference 검증을 완료했으며 parity failure 0회, 평균 1.835 ms, 관측 최대 1.977 ms를 확인했다. F6의 실제 CAN-controller 기반 장시간·최대부하 physical validation은 아직 완료되지 않았으며 Renode 결과와 구분한다.
 
 ### 5.5 실시간 스트리밍 검증 — ICSim (F1)
+ICSim 및 `vcan0` 환경을 준비합니다.
+
 ```bash
 cd ICSim && make && cd ..
 Xvfb :98 -screen 0 1024x768x16 &
 export DISPLAY=:98
 sudo ip link add dev vcan0 type vcan 2>/dev/null; sudo ip link set up vcan0
 cd ICSim && ./icsim vcan0 & ./controls vcan0 & cd ..
+```
 
-candump -l vcan0 &  # 60초 후 Ctrl+C
-python3 src/21_fit_icsim_stats.py ICSim/candump-*.log
+기존 실시간 탐지 및 공격 주입:
 
+```bash
 python3 src/23_icsim_realtime_detect.py 90     # 터미널 1
 python3 src/22_icsim_attack_inject.py 90       # 터미널 2 (1~2초 후)
 
 python3 src/27_evaluate_icsim_fixed.py 0x39 0x294 0x143
 ```
-⚠️ `24_evaluate_icsim.py`는 저평가된 결과를 냅니다. **최종 수치는 반드시 `27_evaluate_icsim_fixed.py`를 사용하세요.**
+
+`27_evaluate_icsim_fixed.py`는 기존 ICSim 평가 로직을 보정한 fixed evaluation입니다.
+
+**최종 F1 결과는 탐지기와 독립된 per-frame Ground Truth 체인으로 추가 재검증했습니다.**
+
+```text
+ICSim / attack injection
+        │
+        ├── CAN traffic ──────────> candump
+        │
+        └── independent GT logger ─> per-frame Ground Truth
+                                      │
+                                      ▼
+                         GT ↔ candump matching
+                                      │
+                                      ▼
+                         prediction ↔ GT evaluation
+```
+
+최종 독립 GT 재검증에 사용한 스크립트:
+
+```text
+src/42_icsim_gt_logger.py
+src/43_match_icsim_ground_truth.py
+src/44_evaluate_icsim_independent_gt.py
+```
+
+최종 재검증 결과:
+
+- Injected GT frames: **9,485**
+- GT → candump matched: **9,485 / 9,485 (100%)**
+- Prediction matched: **9,483 / 9,485 (99.9789%)**
+- 처리된 공격 프레임 attack recall: **100%**
+- End-to-end recall: **99.9789%**
+- 별도 normal-only FPR: **0.053538%**
+
+> ⚠️ `src/24_evaluate_icsim.py`는 구버전 평가입니다. `src/27_evaluate_icsim_fixed.py`에서 기존 평가 로직을 보정했으며, **최종 F1 성능 근거는 `42 → 43 → 44`의 독립 per-frame GT 재검증 결과를 기준으로 합니다.**
 
 ---
 
