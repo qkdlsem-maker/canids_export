@@ -71,7 +71,7 @@ CAN 버스 실시간 스트림
 | `data_full/` | HCRL 전체(DoS/Fuzzy/gear/RPM_dataset.csv, 1,657만 행, 실제 타임스탬프) | **F2 이후 모든 실험의 기준 데이터** |
 | `road_data/` | ORNL ROAD Dataset(공격/정상 각각) | F3 교차검증 전용 |
 
-**최종 embedded 모델은 `models_c/can_ids_embedded_v2.c`입니다.** Frozen V2는 6개의 CAN-ID-independent feature를 사용하며, `NORMAL_IDX=2`, `CODE_MAP={1,2,0,3,4}`, Mahalanobis threshold `10.104021265036314`를 사용합니다. 기존 `can_ids_embedded.c`와 `can_ids_embedded_full.c`는 이전 실험 계열로만 유지하며 F5/F6 최종 pre-hardware 결과의 기준이 아닙니다.
+**최종 embedded 모델은 `models_c/can_ids_embedded_v2.c`입니다.** Frozen V2는 6개의 CAN-ID-independent feature를 사용하며, `NORMAL_IDX=2`, `CODE_MAP={1,2,0,3,4}`, Mahalanobis threshold `10.104021265036314`를 사용합니다. 기존 can_ids_embedded.c 와 can_ids_embedded_full.c 는 이전 실험 계열로만 유지하며, 현재 Frozen V2 및 F5/F6 검증의 기준 모델이 아닙니다.
 
 ---
 
