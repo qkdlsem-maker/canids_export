@@ -331,20 +331,21 @@ V3 temporal 및 V4 byte-temporal 실험은 post-hoc ablation이며 최종 모델
 
 ---
 
-### 6. Scope and Remaining Hardware Limitation
+## 6. Scope and Remaining Hardware Limitation
 
-본 문서의 CAN load 및 long-duration 결과는 Linux SocketCAN/vcan 기반 host-side validation이다.
+본 문서의 CAN load 및 long-duration 결과는 **Linux SocketCAN/vcan 기반 host-side validation**이며, 실제 MCU의 CAN-controller 최대부하 시험과 구분한다.
 
-`vcan`은 실제 CAN arbitration 및 physical bit timing을 재현하지 않는다.
+한편 F5에서는 실제 **NUCLEO-F446RE (STM32F446RE, Cortex-M4, 84 MHz)**에서 Frozen V2 IDS를 구동하여 **100,000회 physical inference**를 수행했고, parity failure 0회와 추론 지연 및 RAM/stack 사용량을 실측했다.
 
-따라서 본 결과는 다음을 직접 입증하지 않는다.
+다만 이 physical F5 시험은 8개의 고정 검증 벡터를 반복 실행한 추론 안정성 시험이며, 실제 CAN-controller를 통한 장시간·최대부하 F6 시험은 아니다.
 
-- 실제 target MCU CAN-controller hardware FIFO overflow immunity
-- 실제 MCU silicon에서의 장시간 안정성
-- 실제 MCU에서의 CPU/resource behavior
+따라서 현재 결과는 다음을 직접 입증하지 않는다.
 
-Renode 및 host-side 결과는 실제 target hardware validation과 구분하여 보고한다.
+- 실제 target MCU CAN-controller의 최대 지속 처리율 및 FIFO overflow immunity
+- 실제 CAN-controller 부하 상태에서의 장시간 physical 안정성
+- 실제 CAN 통신과 기존 ECU 제어 태스크가 결합된 조건에서의 최대부하 동작
 
+F6의 부하·장시간 동작은 Renode 및 host-side에서 정량 검증했으며, **실제 CAN-controller 기반 장시간·최대부하 physical validation은 아직 완료되지 않았다.** Renode/host-side 결과와 실제 target hardware 결과는 구분하여 보고한다.
 ---
 
 ## 6. 저장소 구조
