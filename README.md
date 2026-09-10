@@ -26,8 +26,8 @@ CAN 버스는 발신자 인증·암호화가 없어 DoS/Fuzzing/Spoofing 공격�
 | F1 | ICSim·can-utils 실시간 주입, 탐지율/오탐률/지연 정량화, Peak RAM/CPU | 기존 실시간 검증에 더해 탐지기와 독립된 per-frame GT 체인으로 재검증. GT→candump 9,485/9,485 (100%), 처리 프레임 attack recall 100%, end-to-end recall 99.9789%, 별도 normal-only FPR 0.053538% | ✅ 완료 |
 | F2 | 5%서브셋→전체 데이터 재현성 검증 | HCRL 전체 약 1,657만 행 재학습 및 시드 3회 반복 검증. F1 1.0000±0, FPR 0.0192%±0 | ✅ 완료 |
 | F3 | CAN ID 의존 낮은 feature set 재설계 | ID-agnostic 6-feature Frozen V2 설계. 전체 데이터 기준 ROAD 공정 비교에서 V1 FPR 100% 실패 → V2 FPR **0.079932%**로 개선 | ✅ 완료 |
-| HCRL 내부 zero-day 탐지(Hybrid) | 기존 동일-domain/held-out 평가에서 99.9~100% 수준 |
-| ROAD 외부 일반화 — V2 frozen threshold | TPR 12.398709%, FPR 0.079932%, Balanced Accuracy 56.159388% |
+| HCRL 내부 zero-day 탐지(Hybrid) | 기존 동일-domain/held-out 평가에서 99.9~100% 수준 | HCRL 내부 held-out/zero-day 조건에서 99.9~100% 수준 확인. 단, 동일 데이터셋 계열 내부 평가이므로 외부 일반화 성능과 구분 | ✅ 완료 |
+| ROAD 외부 일반화 — V2 frozen threshold | TPR 12.398709%, FPR 0.079932%, Balanced Accuracy 56.159388% | ORNL ROAD 외부 데이터셋에서 Frozen V2 기준 TPR 12.398709%, FPR 0.079932%, Balanced Accuracy 56.159388%. 외부 미지 공격 탐지 성능의 한계를 포함해 그대로 보고 | ✅ 완료 |
 | F5 | 실제 MCU Flash/RAM/CPU/WCET/탐지지연 | NUCLEO-F446RE (STM32F446RE, Cortex-M4, 84 MHz)에서 Frozen V2 실제 구동. 8개 검증 벡터 × 12,500회 = 100,000회 physical inference, 판정 불일치 0회. DWT 기준 최소 1.574 ms, 평균 1.835 ms, 관측 최대 1.977 ms. Static RAM 524 B, observed stack high-water 368 B, 합산 관측치 892 B. 관측 최대값은 formal WCET가 아님 | 🟢 Renode/pre-hardware + physical MCU F5 완료 |
 | F6 | 기존 ECU 기능과 동시 동작(장시간·최대부하) | Renode에서 CAN1 FIFO0→RX IRQ→SW queue→V2 feature→Frozen Hybrid + 100 Hz synthetic control task 동시 실행. 843.75 fps 3/3 internal lossless, 847.65625 fps에서 3/3 SW-queue loss 발생. 60분 nominal 500 fps에서 CAN1 수신 프레임 전부 처리, SW overflow 0, control deadline miss 0. 실제 CAN-controller 기반 physical 장시간·최대부하 검증은 미완료이며 Renode 결과와 구분 |  |
 | F7 | (선행 결함) C 변환기 정상 클래스 인덱스 오류 | NORMAL_IDX/CODE_MAP 도입 및 x86 + ARM 회귀테스트로 검증 | ✅ 완료 |
