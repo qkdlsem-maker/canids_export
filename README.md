@@ -29,7 +29,7 @@ CAN 버스는 발신자 인증·암호화가 없어 DoS/Fuzzing/Spoofing 공격�
 | HCRL 내부 zero-day 탐지(Hybrid) | 기존 동일-domain/held-out 평가에서 99.9~100% 수준 |
 | ROAD 외부 일반화 — V2 frozen threshold | TPR 12.398709%, FPR 0.079932%, Balanced Accuracy 56.159388% |
 | F5 | 실제 MCU Flash/RAM/CPU/WCET/탐지지연 | Frozen V2 6-feature C export를 Cortex-M4로 검증. Canonical build 기준 Flash proxy **247.66 KiB**, static RAM **636 B**. Renode에서는 instruction-equivalent count를 측정하며 실제 MCU cycle/WCET/latency로 환산하지 않음 | 🟢 Renode/pre-hardware + physical MCU F5 완료 |
-| F6 | 기존 ECU 기능과 동시 동작(장시간·최대부하) | CAN1 FIFO0→RX IRQ→SW queue→V2 feature→Frozen Hybrid와 100 Hz synthetic control task를 동시 실행. **843.75 fps는 3/3 internal lossless**, **847.65625 fps는 3/3 SW-queue loss 발생**. 60분 nominal 500 fps에서 CAN1 수신 프레임 전부 처리, SW overflow 0, control deadline miss 0 | 🟡 Renode/pre-hardware 완료 · physical MCU pending |
+| F6 | 기존 ECU 기능과 동시 동작(장시간·최대부하) | CAN1 FIFO0→RX IRQ→SW queue→V2 feature→Frozen Hybrid와 100 Hz synthetic control task를 동시 실행. **843.75 fps는 3/3 internal lossless**, **847.65625 fps는 3/3 SW-queue loss 발생**. 60분 nominal 500 fps에서 CAN1 수신 프레임 전부 처리, SW overflow 0, control deadline miss 0 |  |
 | F7 | (선행 결함) C 변환기 정상 클래스 인덱스 오류 | NORMAL_IDX/CODE_MAP 도입, x86+ARM 회귀테스트로 검증 | ✅ 완료 |
 
 **F5/F6 남은 한계**: formal WCET는 대표 입력에 대한 실측이며 모든 입력의 수학적 최악값 증명은 아니다. Renode bxCAN 및 Linux SocketCAN/vcan에서 FIFO·최대부하·약 1시간 장시간 안정성을 보강 검증했지만, **실제 target MCU silicon에서의 CAN-controller FIFO overflow immunity, CPU/resource behavior, 장시간 연속 운용은 아직 검증하지 않았다.** 따라서 Renode/host-side 결과는 실제 하드웨어 검증과 구분하여 보고한다.
