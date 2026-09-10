@@ -58,8 +58,8 @@ CAN 버스 실시간 스트림
 | HCRL 내부 zero-day 탐지(Hybrid) | 기존 동일-domain/held-out 평가에서 99.9~100% 수준 |
 | ROAD 외부 일반화 — V2 frozen threshold | TPR 12.398709%, FPR 0.079932%, Balanced Accuracy 56.159388% |
 | 하이브리드 e2e 지연 | 0.11~0.31ms (PC 기준) |
-| Cortex-M4 Flash proxy / static RAM | **247.66 KiB / 636 B** (Frozen V2 canonical build) |
-| Renode inference execution count | 대표 입력 **95,063~105,397**, 1,000-sample sweep **87,689~111,755 instruction-equivalent counts** |
+| Physical MCU Flash / RAM | Flash proxy 247.66 KiB / static RAM 524 B, observed stack high-water 368 B (STM32F446RE, 84 MHz) |
+| Physical MCU inference latency / stability | 100,000회 physical inference, parity failure 0회 / 평균 154,103.096 cycles (1.835 ms), 관측 최대 166,086 cycles (1.977 ms) |
 
 ---
 
