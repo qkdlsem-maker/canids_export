@@ -392,12 +392,12 @@ canids_export/
 
 ## 6.1 심사용 Offline Dashboard
 
-본선 시연용 Flask dashboard는 인터넷 연결 없이 `localhost`에서 동작한다. 저장된 판정 결과를 표시하는 방식이 아니라 실제 CAN replay frame을 Frozen V2 pipeline에 입력하여 feature와 prediction을 실행 중 계산한다.
+본선 시연용 Flask dashboard는 인터넷 연결 없이 `localhost`에서 동작한다. 저장된 판정 결과를 단순 표시하는 방식이 아니라, 사전에 기록된 CAN frame을 Frozen V2 pipeline에 입력하여 feature와 prediction을 실행 시점에 계산한다.
 
 - `NORMAL`: ICSim baseline
 - `DoS`: known attack
 - `FUZZY`: known attack
-- `SPOOF`: unknown-style anomaly replay
+- `SPOOF`: unknown-style anomaly scenario
 - ROAD: Live Demo와 분리된 External Validation evidence
 
 Windows 실행: `run_demo.bat`
