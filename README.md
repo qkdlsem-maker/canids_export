@@ -307,46 +307,47 @@ Renode 및 host-side 결과는 실제 target hardware validation과 구분하여
 ## 6. 저장소 구조
 ## 6. 저장소 구조
 
-text
+## 6. 저장소 구조
+
+```text
 canids_export/
-├── data/                         # 5% 서브셋 (구버전)
-├── data_full/                    # HCRL 전체 데이터셋 (F2 이후 기준)
-├── road_data/                    # ORNL ROAD Dataset + capture_metadata.json
-├── ICSim/                        # zombieCraig ICSim 클론 (F1)
+├── data/                          # 5% 서브셋 (구버전)
+├── data_full/                     # HCRL 전체 데이터셋 (F2 이후 기준)
+├── road_data/                     # ORNL ROAD Dataset + capture_metadata.json
+├── ICSim/                         # zombieCraig ICSim 클론 (F1)
 │
 ├── src/
-│   ├── 01~09                     # 예선 제출본(5% 서브셋) 파이프라인
+│   ├── 01~09                      # 예선 제출본(5% 서브셋) 파이프라인
 │   ├── 10_build_features_full.py
 │   ├── 11_train_full.py
 │   ├── 12_ablation_study.py
 │   ├── 13_build_features_v2.py
 │   ├── 14_train_v2_and_road_test.py
-│   ├── 15~17                     # F1 초기 실시간 검증(구버전)
+│   ├── 15~17                      # F1 초기 실시간 검증(구버전)
 │   ├── 18_train_full_repeated.py
 │   ├── 20_road_test_v1_full.py
 │   ├── 21_fit_icsim_stats.py
 │   ├── 22_icsim_attack_inject.py
 │   ├── 23_icsim_realtime_detect.py
-│   ├── 24_evaluate_icsim.py      # ⚠️ 구버전, 재평가됨
+│   ├── 24_evaluate_icsim.py       # ⚠ 구버전, 재평가됨
 │   ├── 25_icsim_threshold_sweep.py
 │   ├── 26_ablation_repeated.py
-│   ├── 27_evaluate_icsim_fixed.py # ✅ 최종 평가
-│   ├── 28_road_test_v2_corrected.py # ✅ 최종 ROAD 평가
+│   ├── 27_evaluate_icsim_fixed.py # 최종 평가
+│   ├── 28_road_test_v2_corrected.py # 최종 ROAD 평가
 │   ├── 29_f4_hybrid_split_metrics.py
 │   └── 30_f4_hybrid_zeroday_split.py
 │
 ├── models_c/
 │   ├── 07_export_to_c.py
 │   ├── can_ids_embedded.c
-│   ├── can_ids_embedded_v2.c     # Frozen V2 최종 embedded model
+│   ├── can_ids_embedded_v2.c      # Frozen V2 최종 embedded model
 │   ├── test_main.c
 │   ├── renode_portable/
-│   ├── fw_test/                  # F5 ElapsedCycles 측정용
-│   └── f5_physical_100k/         # 실제 STM32F446RE 100K 검증
+│   ├── fw_test/                   # F5 ElapsedCycles 측정용
+│   └── f5_physical_100k/          # 실제 STM32F446RE 100K 검증
 │
 └── results/
-
----
+```
 
 ## 6.1 심사용 Offline Dashboard
 
