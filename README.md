@@ -411,8 +411,8 @@ Windows 실행: `run_demo.bat`
 ## 7. 알려진 한계 (Known Limitations)
 
 1. **F5 CPU 점유율**: 베어메탈 단일 태스크 환경이라 측정 안 함. RTOS 환경에서 재정의 필요.
-2. **F5 timing limitation**: Renode 실행 수치는 instruction-equivalent count이며 실제 MCU의 cycle-accurate WCET 또는 latency로 환산하지 않는다. Physical MCU timing 측정은 pending이다.
-3. **F6 physical validation**: Renode에서 60분 concurrent test와 부하 경계시험을 완료했으나, 실제 MCU silicon에서의 CAN-controller behavior 및 장시간 연속운용은 pending이다.
+2. **F5 timing limitation**: 실제 STM32F446RE(84 MHz)에서 DWT cycle을 이용해 100,000회 physical inference를 측정했으며, 평균 1.835 ms, 관측 최대 1.977 ms였다. 단, 1.977 ms는 시험에서 관측된 최대값이며 formal WCET를 의미하지 않는다.
+3. **F6 physical validation**: Renode에서 60분 concurrent test와 부하 경계시험을 완료했으나, 실제 target MCU의 CAN-controller를 이용한 장시간·최대부하 physical validation은 아직 완료되지 않았다. F5의 실제 MCU 추론 검증과 F6의 Renode 부하 검증은 구분하여 해석한다.
 4. **F3 ROAD 일부 공격 유형**: `max_speedometer`/`reverse_light` 계열(값-고정형 스푸핑)은 정밀 재평가해도 탐지율 0% — ID-agnostic 피처의 구조적 한계로 판단됨.
 5. **평가 방법론 일반**: 배경 트래픽 밀도가 높은 환경에서는 "시간구간 기준" recall이 아니라 "실제 공격 메시지 기준" recall을 써야 함 — F1/F3 양쪽에서 반복 확인된 교훈.
 
