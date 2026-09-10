@@ -305,9 +305,6 @@ Renode 및 host-side 결과는 실제 target hardware validation과 구분하여
 ---
 
 ## 6. 저장소 구조
-## 6. 저장소 구조
-
-## 6. 저장소 구조
 
 ```text
 canids_export/
