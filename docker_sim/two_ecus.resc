@@ -1,0 +1,13 @@
+emulation CreateCANHub "canHub"
+mach create "ecu_a"
+machine LoadPlatformDescription @platforms/boards/stm32f4_discovery-kit.repl
+sysbus LoadELF @build/ecu_a.elf
+connector Connect can1 canHub
+emulation CreateServerSocketTerminal 7001 "uart_a" false
+connector Connect usart2 uart_a
+mach create "ecu_b"
+machine LoadPlatformDescription @platforms/boards/stm32f4_discovery-kit.repl
+sysbus LoadELF @build/ecu_b.elf
+connector Connect can1 canHub
+emulation CreateServerSocketTerminal 7002 "uart_b" false
+connector Connect usart2 uart_b

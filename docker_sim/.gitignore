@@ -1,0 +1,5 @@
+build/
+generated/
+evaluation/tested_firmware/*.elf
+prepared/*.jsonl
+__pycache__/

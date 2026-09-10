@@ -1,0 +1,10 @@
+services:
+  simulation:
+    cap_add: [NET_ADMIN]
+    build:
+      context: ..
+      dockerfile: docker_sim/Dockerfile
+    volumes:
+      - ./results:/app/docker_sim/results
+      - ./prepared:/app/docker_sim/prepared:ro
+    stop_grace_period: 15s
